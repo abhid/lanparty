@@ -16,6 +16,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -122,6 +123,27 @@ func (s *Server) Handler() http.Handler {
 	// static assets
 	assets, _ := fs.Sub(s.webFS, "assets")
 	mux.Handle("/assets/", http.StripPrefix("/assets/", http.FileServer(http.FS(assets))))
+
+	// favicon (serve a small svg; avoids embedding a binary .ico)
+	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/svg+xml; charset=utf-8")
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		// Simple mark using our "folders" motif (Tabler-esque stroke icon).
+		_, _ = io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#eef2ff"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#g)" stroke="#cbd5e1" stroke-width="2"/>
+  <g fill="none" stroke="#2563eb" stroke-linecap="round" stroke-linejoin="round" stroke-width="3">
+    <path d="M24 18h8l5 5h13a6 6 0 0 1 6 6v16a6 6 0 0 1-6 6H24a6 6 0 0 1-6-6V24a6 6 0 0 1 6-6"/>
+    <path d="M46 45v5a6 6 0 0 1-6 6H16a6 6 0 0 1-6-6V28a6 6 0 0 1 6-6h6"/>
+  </g>
+</svg>`)
+	})
 
 	// UI index
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -984,6 +1006,18 @@ func (s *Server) handleZip(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleThumb(w http.ResponseWriter, r *http.Request) {
 	// Very small thumbnailer: supports jpg/png/gif input, outputs jpeg.
 	rel := fsutil.CleanRelPath(r.URL.Query().Get("path"))
+	max := 256
+	if sv := strings.TrimSpace(r.URL.Query().Get("s")); sv != "" {
+		if n, err := strconv.Atoi(sv); err == nil {
+			if n < 64 {
+				n = 64
+			}
+			if n > 1024 {
+				n = 1024
+			}
+			max = n
+		}
+	}
 	abs, err := fsutil.JoinWithinRoot(s.cfg.Root, rel)
 	if err != nil {
 		http.Error(w, "bad path", http.StatusBadRequest)
@@ -1002,22 +1036,34 @@ func (s *Server) handleThumb(w http.ResponseWriter, r *http.Request) {
 
 	thumbDir := filepath.Join(s.cfg.StateDir, "thumbs")
 	_ = os.MkdirAll(thumbDir, 0o755)
-	key := safeKey(rel) + "-" + fmt.Sprintf("%d", st.ModTime().Unix()) + ".jpg"
+	key := safeKey(rel) + "-" + fmt.Sprintf("%d", st.ModTime().Unix()) + "-" + fmt.Sprintf("%d", max) + ".jpg"
 	thumbPath := filepath.Join(thumbDir, key)
+
+	// Strong cache key: changes when file mtime or requested size changes.
+	etag := `"` + key + `"`
+	if inm := r.Header.Get("If-None-Match"); inm != "" && strings.Contains(inm, etag) {
+		w.Header().Set("ETag", etag)
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+
 	if b, err := os.ReadFile(thumbPath); err == nil {
 		w.Header().Set("Content-Type", "image/jpeg")
-		w.Header().Set("Cache-Control", "public, max-age=3600")
+		w.Header().Set("ETag", etag)
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		_, _ = w.Write(b)
 		return
 	}
-	b, err := makeThumb(abs, 256)
+	b, err := makeThumb(abs, max)
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
 	_ = os.WriteFile(thumbPath, b, 0o644)
 	w.Header().Set("Content-Type", "image/jpeg")
-	w.Header().Set("Cache-Control", "public, max-age=3600")
+	w.Header().Set("ETag", etag)
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	_, _ = w.Write(b)
 }
 

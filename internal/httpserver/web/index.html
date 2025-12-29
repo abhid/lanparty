@@ -49,6 +49,9 @@
                 <button class="opbtn" id="op-mkdir" title="New folder" data-tip="New folder" aria-label="New folder">
                 <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#newfolder"></use></svg>
                 </button>
+                <button class="opbtn" id="op-wide" title="Widescreen" data-tip="Widescreen" aria-label="Widescreen">
+                <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#wide"></use></svg>
+                </button>
               </div>
               <div class="opsgrp" aria-label="Selection actions">
                 <button class="opbtn" id="op-zip" title="Download zip" data-tip="Download zip" aria-label="Download zip" disabled>
@@ -61,29 +64,49 @@
               <input id="file" type="file" multiple class="hidden" />
             </div>
           </div>
-          <div class="table">
-            <div class="thead">
-              <div>Name</div>
-              <div class="right">Size</div>
-              <div class="right">Modified</div>
-            </div>
-            <div id="rows" class="tbody"></div>
-          </div>
-
-          <section class="readme hidden" id="readme">
-            <div class="rhead">
-              <div class="rtitle">
-                <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#text"></use></svg>
-                README
+          <div class="contentgrid" id="contentgrid">
+            <div class="listpane">
+              <div class="table">
+                <div class="thead">
+                  <div>Name</div>
+                  <div class="right">Size</div>
+                  <div class="right">Modified</div>
+                </div>
+                <div id="rows" class="tbody"></div>
               </div>
-              <div class="spacer"></div>
-              <a class="btn ghost" id="readme-open" target="_blank" rel="noreferrer">
-                <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#open"></use></svg>
-                Open
-              </a>
+
+              <section class="readme hidden" id="readme">
+                <div class="rhead">
+                  <div class="rtitle">
+                    <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#text"></use></svg>
+                    README
+                  </div>
+                  <div class="spacer"></div>
+                  <a class="btn ghost" id="readme-open" target="_blank" rel="noreferrer">
+                    <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#open"></use></svg>
+                    Open
+                  </a>
+                </div>
+                <div class="rbody" id="readme-body"></div>
+              </section>
             </div>
-            <div class="rbody" id="readme-body"></div>
-          </section>
+
+            <aside class="pvside hidden" id="spv" aria-label="Preview">
+              <div class="pvhead">
+                <div class="pvtitle" id="spv-title">Preview</div>
+                <div class="spacer"></div>
+                <a class="btn ghost" id="spv-open" target="_blank" rel="noreferrer">
+                  <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#open"></use></svg>
+                  Open
+                </a>
+                <a class="btn" id="spv-download">
+                  <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#download"></use></svg>
+                  Download
+                </a>
+              </div>
+              <div class="pvbody" id="spv-body"></div>
+            </aside>
+          </div>
         </section>
       </div>
     </main>

@@ -10,6 +10,7 @@ const opUpload = $("op-upload");
 const opMkdir = $("op-mkdir");
 const opZip = $("op-zip");
 const opClear = $("op-clear");
+const opWide = $("op-wide");
 
 const modal = $("modal");
 const modalBackdrop = $("modal-backdrop");
@@ -18,6 +19,12 @@ const pvTitle = $("pv-title");
 const pvBody = $("pv-body");
 const pvOpen = $("pv-open");
 const pvDownload = $("pv-download");
+
+const spv = $("spv");
+const spvTitle = $("spv-title");
+const spvBody = $("spv-body");
+const spvOpen = $("spv-open");
+const spvDownload = $("spv-download");
 
 let statusBase = "";
 
@@ -40,6 +47,36 @@ let selected = new Set();
 let lastClickedIndex = -1;
 let ren = null; // {path, value}
 let renFocus = null; // path to focus after rerender
+
+let wideMode = false;
+
+let lazyObs = null;
+function lazyInit() {
+  if (lazyObs || !("IntersectionObserver" in window)) return;
+  lazyObs = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      const el = e.target;
+      const src = el?.dataset?.src;
+      if (src && !el.src) {
+        el.src = src;
+        try { el.load?.(); } catch {}
+      }
+      lazyObs.unobserve(el);
+    }
+  }, {rootMargin: "400px 0px"});
+}
+
+function lazyObserve(el, src) {
+  if (!el || !src) return;
+  lazyInit();
+  if (!lazyObs) {
+    el.src = src;
+    return;
+  }
+  el.dataset.src = src;
+  lazyObs.observe(el);
+}
 
 function encPath(rel) {
   // encode each segment so "/a b/c" becomes "/a%20b/c"
@@ -231,6 +268,127 @@ function iconUse(id) {
   return `<svg class="i" aria-hidden="true"><use href="/assets/icons.svg#${id}"></use></svg>`;
 }
 
+function rerenderRows() {
+  if (!rows) return;
+  rows.innerHTML = "";
+  for (const it of (lastList || [])) rows.appendChild(rowFor(it));
+}
+
+function thumbUrl(u, size) {
+  if (!u) return u;
+  const s = Number(size) || 0;
+  if (s <= 0) return u;
+  return u + (u.includes("?") ? "&" : "?") + `s=${encodeURIComponent(String(s))}`;
+}
+
+function setWideMode(on) {
+  wideMode = Boolean(on);
+  try {
+    localStorage.setItem("lanpartyWide", wideMode ? "1" : "0");
+  } catch {}
+  document.body.classList.toggle("wide", wideMode);
+  if (opWide) opWide.classList.toggle("active", wideMode);
+  // widescreen is a gallery mode now; keep the old side preview hidden
+  if (spv) spv.classList.add("hidden");
+  // Rebuild the listing so the DOM matches the mode (tiles vs table rows).
+  rerenderRows();
+}
+
+function initWideMode() {
+  let on = false;
+  try {
+    on = localStorage.getItem("lanpartyWide") === "1";
+  } catch {}
+  setWideMode(on);
+}
+
+async function renderWidePreview(item) {
+  if (!spvBody || !spvTitle) return;
+  spvBody.innerHTML = "";
+
+  if (!item || !item.path) {
+    spvTitle.textContent = "Preview";
+    if (spvOpen) spvOpen.setAttribute("href", "#");
+    if (spvDownload) spvDownload.removeAttribute("href");
+    const d = document.createElement("div");
+    d.className = "pvempty";
+    d.textContent = "Select a single file to preview.";
+    spvBody.appendChild(d);
+    return;
+  }
+
+  const kind = classify(item);
+  const url = fileUrl(item.path);
+  spvTitle.textContent = item.path || item.name || "Preview";
+  if (spvOpen) spvOpen.href = url;
+  if (spvDownload) {
+    spvDownload.href = fileUrl(item.path, {dl:true});
+    spvDownload.setAttribute("download", item.name || "download");
+  }
+
+  if (!isPreviewable(kind) || item.isDir) {
+    const d = document.createElement("div");
+    d.className = "pvempty";
+    d.textContent = item.isDir ? "Folders cannot be previewed." : "No preview available for this file type.";
+    spvBody.appendChild(d);
+    return;
+  }
+
+  if (kind === "image") {
+    const img = document.createElement("img");
+    img.className = "pv-media pv-img";
+    img.src = url;
+    img.alt = item.name || "";
+    spvBody.appendChild(img);
+    return;
+  }
+  if (kind === "video") {
+    const v = document.createElement("video");
+    v.className = "pv-media";
+    v.controls = true;
+    v.playsInline = true;
+    v.preload = "metadata";
+    v.src = url;
+    spvBody.appendChild(v);
+    return;
+  }
+  if (kind === "audio") {
+    const a = document.createElement("audio");
+    a.className = "pv-media";
+    a.controls = true;
+    a.preload = "metadata";
+    a.src = url;
+    spvBody.appendChild(a);
+    return;
+  }
+  if (kind === "pdf") {
+    const f = document.createElement("iframe");
+    f.className = "pv-media";
+    f.src = url;
+    f.referrerPolicy = "no-referrer";
+    spvBody.appendChild(f);
+    return;
+  }
+  if (kind === "text") {
+    const pre = document.createElement("pre");
+    pre.className = "pv-pre";
+    pre.textContent = "Loading…";
+    spvBody.appendChild(pre);
+    try {
+      const res = await fetch(url, {headers: {"Range": "bytes=0-262143"}});
+      if (!res.ok && res.status !== 206) throw new Error(await res.text());
+      let txt = await res.text();
+      if (txt.length >= 262144) txt += "\n\n…(truncated)…";
+      pre.textContent = txt;
+    } catch (e) {
+      pre.textContent = `Preview failed: ${String(e)}`;
+    }
+    return;
+  }
+}
+
+function updateWidePreview() {}
+
 function hideCtx() {
   if (!ctxOpen) return;
   ctx.classList.add("hidden");
@@ -352,30 +510,131 @@ function setSelection(paths) {
   updateSelectionUI();
 }
 
+function confirmToast(msg, opts = {}) {
+  // Non-blocking confirmation UI using the toast system.
+  // Returns Promise<boolean>.
+  if (!toasts) return Promise.resolve(false);
+
+  const type = opts.type || "err"; // err|ok|info
+  const sub = opts.sub || "";
+  const okLabel = opts.okLabel || "Delete";
+  const cancelLabel = opts.cancelLabel || "Cancel";
+  const iconId = opts.icon || "trash";
+
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => {
+      if (done) return;
+      done = true;
+      el.remove();
+      resolve(v);
+    };
+
+    const el = document.createElement("div");
+    el.className = `toast ${type} confirm`;
+
+    const i = document.createElement("div");
+    i.className = "ti";
+    i.innerHTML = iconUse(iconId);
+
+    const msgEl = document.createElement("div");
+    msgEl.className = "msg";
+    msgEl.textContent = msg;
+
+    if (sub) {
+      const s = document.createElement("div");
+      s.className = "sub";
+      s.textContent = sub;
+      msgEl.appendChild(s);
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "acts";
+
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "act";
+    cancel.textContent = cancelLabel;
+    cancel.onclick = (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      finish(false);
+    };
+
+    const ok = document.createElement("button");
+    ok.type = "button";
+    ok.className = "act danger";
+    ok.textContent = okLabel;
+    ok.onclick = (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      finish(true);
+    };
+
+    actions.appendChild(cancel);
+    actions.appendChild(ok);
+    msgEl.appendChild(actions);
+
+    const x = document.createElement("button");
+    x.type = "button";
+    x.className = "x";
+    x.innerHTML = iconUse("close");
+    x.onclick = (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      finish(false);
+    };
+
+    const row = document.createElement("div");
+    row.className = "trow";
+    row.appendChild(i);
+    row.appendChild(msgEl);
+    row.appendChild(x);
+    el.appendChild(row);
+
+    // Don't auto-dismiss on click for confirmations.
+    el.onclick = (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+    };
+
+    toasts.appendChild(el);
+    while (toasts.children.length > 4) {
+      toasts.firstElementChild?.remove();
+    }
+
+    // Focus the destructive action for quick keyboard flow.
+    window.setTimeout(() => {
+      ok.focus();
+    }, 0);
+  });
+}
+
 async function deletePaths(paths) {
   paths = (paths || []).filter(Boolean);
   if (!paths.length) return;
-  const msg = paths.length === 1 ? `Delete “${paths[0]}”? This cannot be undone.` : `Delete ${paths.length} selected items? This cannot be undone.`;
-  if (!confirm(msg)) return;
-  let ok = 0;
-  let fail = 0;
+  const msg = paths.length === 1 ? `Delete “${paths[0]}”?` : `Delete ${paths.length} selected items?`;
+  const confirmed = await confirmToast(msg, {sub: "This cannot be undone.", okLabel: "Delete", cancelLabel: "Cancel", type: "err", icon: "trash"});
+  if (!confirmed) return;
+  let okCount = 0;
+  let failCount = 0;
   let lastErr = "";
   for (const p of paths) {
     try {
       await apiDelete(p);
-      ok++;
+      okCount++;
     } catch (e) {
-      fail++;
+      failCount++;
       lastErr = String(e);
     }
   }
   selected = new Set();
   updateSelectionUI();
   await refresh();
-  if (fail === 0) {
-    toast("Deleted", {type: "ok", sub: `${ok} item(s)`});
+  if (failCount === 0) {
+    toast("Deleted", {type: "ok", sub: `${okCount} item(s)`});
   } else {
-    const sub = lastErr ? `${ok} ok, ${fail} failed · ${lastErr}` : `${ok} ok, ${fail} failed`;
+    const sub = lastErr ? `${okCount} ok, ${failCount} failed · ${lastErr}` : `${okCount} ok, ${failCount} failed`;
     toast("Delete completed with errors", {type: "err", sub, dur: 4500});
   }
 }
@@ -759,12 +1018,16 @@ async function openPreview(item) {
 }
 
 function rowFor(item) {
+  const view = parseView();
+  const inSearch = Boolean(view.q);
+  if (wideMode && !inSearch) {
+    return rowForTile(item);
+  }
+
   const el = document.createElement("div");
   el.className = "row";
 
   const kind = classify(item);
-  const view = parseView();
-  const inSearch = Boolean(view.q);
 
   const namecell = document.createElement("div");
   namecell.className = "namecell";
@@ -903,6 +1166,194 @@ function rowFor(item) {
       // Normal click:
       // - if only this item is selected, toggle it off
       // - else select just this item
+      if (selected.has(item.path)) {
+        if (selected.size === 1) setSelection([]);
+        else setSelection([item.path]);
+      } else {
+        setSelection([item.path]);
+      }
+    }
+
+    rows.innerHTML = "";
+    for (const it of lastList) rows.appendChild(rowFor(it));
+  };
+
+  return el;
+}
+
+function rowForTile(item) {
+  const el = document.createElement("div");
+  el.className = "row";
+
+  const kind = classify(item);
+
+  const prev = document.createElement("div");
+  prev.className = "tileprev";
+  if (kind === "image" && item.thumb) {
+    const img = document.createElement("img");
+    img.loading = "lazy";
+    img.decoding = "async";
+    img.alt = item.name || "";
+    img.src = thumbUrl(item.thumb, 768);
+    prev.appendChild(img);
+  } else if (kind === "image") {
+    const img = document.createElement("img");
+    img.loading = "lazy";
+    img.decoding = "async";
+    img.alt = item.name || "";
+    img.src = fileUrl(item.path);
+    prev.appendChild(img);
+  } else if (kind === "video") {
+    const v = document.createElement("video");
+    v.className = "tilevid";
+    v.muted = true;
+    v.playsInline = true;
+    v.preload = "metadata";
+    v.controls = false;
+    // Lazy-load videos to avoid hammering the network for large folders.
+    lazyObserve(v, fileUrl(item.path));
+    // Subtle hover preview (muted) when loaded.
+    let hov = false;
+    const ensureLoaded = () => {
+      if (!v.src && v.dataset && v.dataset.src) {
+        v.src = v.dataset.src;
+        try { v.load(); } catch {}
+      }
+    };
+    const safePlay = () => {
+      try {
+        ensureLoaded();
+        const p = v.play();
+        if (p && typeof p.catch === "function") p.catch(() => {}); // swallow AbortError, etc
+      } catch {}
+    };
+    const safeStop = () => {
+      try { v.pause(); } catch {}
+      try { v.currentTime = 0; } catch {}
+    };
+    v.addEventListener("mouseenter", () => {
+      hov = true;
+      safePlay();
+    });
+    v.addEventListener("mouseleave", () => {
+      hov = false;
+      safeStop();
+    });
+    v.addEventListener("loadeddata", () => {
+      if (hov) safePlay();
+    });
+    prev.appendChild(v);
+  } else if (item.isDir) {
+    prev.innerHTML = iconUse("folder");
+  } else {
+    prev.innerHTML = iconUse(kind);
+  }
+
+  const namecell = document.createElement("div");
+  namecell.className = "namecell";
+
+  let fname;
+  if (ren && ren.path === item.path) {
+    const inp = document.createElement("input");
+    inp.type = "text";
+    inp.className = "renin";
+    inp.value = ren.value || item.name || "";
+    inp.setAttribute("data-path", item.path);
+    inp.oninput = () => { if (ren && ren.path === item.path) ren.value = inp.value; };
+    inp.onkeydown = async (ev) => {
+      if (ev.key === "Escape") {
+        ev.preventDefault();
+        ev.stopPropagation();
+        cancelRename();
+        rows.innerHTML = "";
+        for (const it of lastList) rows.appendChild(rowFor(it));
+        return;
+      }
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        ev.stopPropagation();
+        await commitRename(item, inp.value);
+      }
+    };
+    inp.onblur = () => {
+      cancelRename();
+      rows.innerHTML = "";
+      for (const it of lastList) rows.appendChild(rowFor(it));
+    };
+    fname = inp;
+  } else {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "fname openname";
+    b.textContent = item.name;
+    b.onclick = (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      hideCtx();
+      if (item.isDir) {
+        setPath(item.path);
+        return;
+      }
+      if (isPreviewable(kind)) openPreview(item);
+      else window.open(fileUrl(item.path), "_blank");
+    };
+    fname = b;
+  }
+
+  const namewrap = document.createElement("div");
+  namewrap.className = "namewrap";
+  namewrap.appendChild(fname);
+
+  const meta = document.createElement("div");
+  meta.className = "tilemeta";
+  if (item.isDir) {
+    meta.textContent = fmtTime(item.mtime);
+  } else {
+    meta.textContent = `${fmtSize(item.size)} · ${fmtTime(item.mtime)}`;
+  }
+  namewrap.appendChild(meta);
+
+  namecell.appendChild(namewrap);
+
+  el.appendChild(prev);
+  el.appendChild(namecell);
+
+  if (selected.has(item.path)) el.classList.add("selected");
+
+  el.oncontextmenu = (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    hideCtx();
+
+    // Desktop-like: right-click selects the item (if not already selected)
+    if (!selected.has(item.path)) {
+      setSelection([item.path]);
+      rows.innerHTML = "";
+      for (const it of lastList) rows.appendChild(rowFor(it));
+    }
+    const idx = lastList.findIndex((x) => x.path === item.path);
+    if (idx >= 0) lastClickedIndex = idx;
+    showCtx(ev.clientX, ev.clientY, item);
+  };
+
+  el.onmousedown = (ev) => {
+    if (ev.button !== 0) return;
+    const t = ev.target;
+    if (t && t.closest && (t.closest(".openname") || t.closest(".renin"))) return;
+    ev.preventDefault();
+  };
+
+  el.onclick = (ev) => {
+    hideCtx();
+    const idx = lastList.findIndex((x) => x.path === item.path);
+    const prevIdx = lastClickedIndex;
+    if (idx >= 0) lastClickedIndex = idx;
+
+    if (ev.shiftKey && prevIdx >= 0 && idx >= 0) {
+      setSelection(selectionRange(prevIdx, idx));
+    } else if (ev.ctrlKey || ev.metaKey) {
+      toggleSelected(item.path);
+    } else {
       if (selected.has(item.path)) {
         if (selected.size === 1) setSelection([]);
         else setSelection([item.path]);
@@ -1528,6 +1979,9 @@ fileEl.addEventListener("change", async (e) => {
 if (opUpload) opUpload.onclick = () => {
   fileEl?.click();
 };
+if (opWide) opWide.onclick = () => {
+  setWideMode(!wideMode);
+};
 if (opUp) opUp.onclick = () => {
   const rel = curPath();
   if (!rel) return;
@@ -1619,6 +2073,7 @@ document.addEventListener("keydown", async (e) => {
   }
 }, true);
 
+initWideMode();
 refresh();
 
 

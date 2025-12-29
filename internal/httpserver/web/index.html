@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>lanparty</title>
+    <link rel="stylesheet" href="/assets/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="#/" title="lanparty">
+        <span class="logo" aria-hidden="true">
+          <svg class="i logo-i"><use href="/assets/icons.svg#folders"></use></svg>
+        </span>
+        <span class="word">lanparty</span>
+      </a>
+      <nav class="crumbs" id="crumbs" aria-label="Path"></nav>
+      <div class="spacer"></div>
+      <div class="searchwrap" title="Search in this folder (press Enter)">
+        <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#search"></use></svg>
+        <input class="search" id="search" placeholder="Search (Enter)…" />
+      </div>
+    </header>
+
+    <main class="main">
+      <div class="workspace">
+        <aside class="sidebar" aria-label="File tree">
+          <div class="sidehead">
+            <div class="sidetitle">
+              <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#folders"></use></svg>
+              Filesystem
+            </div>
+          </div>
+          <div class="tree" id="tree"></div>
+        </aside>
+
+        <section class="content">
+          <div class="opbar">
+            <div class="status" id="status"></div>
+            <div class="spacer"></div>
+            <div class="ops" role="toolbar" aria-label="File operations">
+              <div class="opsgrp" aria-label="Navigation and create">
+                <button class="opbtn" id="op-up" title="Up" data-tip="Up" aria-label="Up">
+                <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#up"></use></svg>
+                </button>
+                <button class="opbtn" id="op-upload" title="Upload" data-tip="Upload" aria-label="Upload">
+                <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#upload"></use></svg>
+                </button>
+                <button class="opbtn" id="op-mkdir" title="New folder" data-tip="New folder" aria-label="New folder">
+                <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#newfolder"></use></svg>
+                </button>
+              </div>
+              <div class="opsgrp" aria-label="Selection actions">
+                <button class="opbtn" id="op-zip" title="Download zip" data-tip="Download zip" aria-label="Download zip" disabled>
+                <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#archive"></use></svg>
+                </button>
+                <button class="opbtn" id="op-clear" title="Clear selection" data-tip="Clear selection" aria-label="Clear selection" disabled>
+                <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#close"></use></svg>
+                </button>
+              </div>
+              <input id="file" type="file" multiple class="hidden" />
+            </div>
+          </div>
+          <div class="table">
+            <div class="thead">
+              <div>Name</div>
+              <div class="right">Size</div>
+              <div class="right">Modified</div>
+            </div>
+            <div id="rows" class="tbody"></div>
+          </div>
+
+          <section class="readme hidden" id="readme">
+            <div class="rhead">
+              <div class="rtitle">
+                <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#text"></use></svg>
+                README
+              </div>
+              <div class="spacer"></div>
+              <a class="btn ghost" id="readme-open" target="_blank" rel="noreferrer">
+                <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#open"></use></svg>
+                Open
+              </a>
+            </div>
+            <div class="rbody" id="readme-body"></div>
+          </section>
+        </section>
+      </div>
+    </main>
+
+    <footer class="footer">
+      <div class="spacer"></div>
+      <div class="footnote">
+        <a class="link" href="https://github.com/abhid/lanparty" target="_blank" rel="noreferrer">github.com/abhid/lanparty</a>
+      </div>
+    </footer>
+
+    <div class="modal hidden" id="modal" aria-hidden="true">
+      <div class="backdrop" id="modal-backdrop"></div>
+      <div class="dialog" role="dialog" aria-modal="true" aria-label="Preview">
+        <div class="mhead">
+          <div class="mtitle" id="pv-title"></div>
+          <div class="spacer"></div>
+          <a class="btn ghost" id="pv-open" target="_blank" rel="noreferrer">
+            <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#open"></use></svg>
+            Open
+          </a>
+          <a class="btn" id="pv-download">
+            <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#download"></use></svg>
+            Download
+          </a>
+          <button class="btn ghost" id="pv-close">
+            <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#close"></use></svg>
+            Close
+          </button>
+        </div>
+        <div class="mbody" id="pv-body"></div>
+      </div>
+    </div>
+
+    <div class="ctx hidden" id="ctx" role="menu" aria-label="File actions"></div>
+    <div class="toasts" id="toasts" aria-live="polite" aria-relevant="additions"></div>
+
+    <script src="/assets/app.js"></script>
+
+    <iframe name="dlframe" class="hidden" title="download"></iframe>
+  </body>
+</html>
+
+

@@ -1,0 +1,20 @@
+{
+  "root": "/srv/lanparty",
+  "stateDir": "/srv/lanparty/.lanparty",
+  "authOptional": true,
+  "users": {
+    "alice": {
+      "bcrypt": "$2a$10$REPLACE_THIS_WITH_OUTPUT_OF_lanparty_passwd"
+    }
+  },
+  "acls": [
+    {
+      "path": "/",
+      "read": ["*"],
+      "write": ["alice"],
+      "admin": ["alice"]
+    }
+  ]
+}
+
+

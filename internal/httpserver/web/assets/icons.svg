@@ -76,6 +76,16 @@
       <path d="M4 14h6v6h-6z" />
       <path d="M14 14h6v6h-6z" />
   </symbol>
+  <symbol id="user" viewBox="0 0 24 24">
+      <path d="M12 12a4 4 0 1 0 -4 -4a4 4 0 0 0 4 4" />
+      <path d="M6 20v-1a4 4 0 0 1 4 -4h4a4 4 0 0 1 4 4v1" />
+  </symbol>
+  <symbol id="key" viewBox="0 0 24 24">
+      <path d="M15 7a4 4 0 1 0 4 4a4 4 0 0 0 -4 -4" />
+      <path d="M10.5 11.5l-7.5 7.5" />
+      <path d="M12 15l3 3" />
+      <path d="M7 21l0 -3l3 0" />
+  </symbol>
   <symbol id="wide" viewBox="0 0 24 24">
       <path d="M4 6a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2l0 -12" />
       <path d="M15 4l0 16" />

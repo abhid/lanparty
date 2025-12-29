@@ -279,59 +279,87 @@ function renderShares() {
 
   state.shareList.forEach((share) => {
     const tr = document.createElement('tr');
+    const editing = Boolean(share.__editing);
+    if (editing) tr.classList.add('editing');
 
     const nameTd = document.createElement('td');
-    nameTd.appendChild(createTextInput(share.name, 'photos', (val) => {
-      share.name = val;
-      markDirty();
-    }));
+    if (editing) {
+      nameTd.appendChild(createTextInput(share.name, 'photos', (val) => {
+        share.name = val;
+        markDirty();
+      }));
+    } else {
+      nameTd.textContent = share.name || '--';
+    }
     tr.appendChild(nameTd);
 
     const rootTd = document.createElement('td');
-    rootTd.appendChild(createTextInput(share.root, '/srv/photos', (val) => {
-      share.root = val;
-      markDirty();
-    }));
+    if (editing) {
+      rootTd.appendChild(createTextInput(share.root, '/srv/photos', (val) => {
+        share.root = val;
+        markDirty();
+      }));
+    } else {
+      rootTd.textContent = share.root || '--';
+    }
     tr.appendChild(rootTd);
 
     const stateTd = document.createElement('td');
-    stateTd.appendChild(createTextInput(share.stateDir, '<root>/.lanparty', (val) => {
-      share.stateDir = val;
-      markDirty();
-    }));
+    if (editing) {
+      stateTd.appendChild(createTextInput(share.stateDir, '<root>/.lanparty', (val) => {
+        share.stateDir = val;
+        markDirty();
+      }));
+    } else {
+      stateTd.textContent = share.stateDir || '--';
+    }
     tr.appendChild(stateTd);
 
     const followTd = document.createElement('td');
-    const followSelect = document.createElement('select');
-    followSelect.className = 'renin';
-    [
-      { value: 'inherit', label: 'Inherit' },
-      { value: 'true', label: 'Follow' },
-      { value: 'false', label: 'Do not follow' },
-    ].forEach((opt) => {
-      const option = document.createElement('option');
-      option.value = opt.value;
-      option.textContent = opt.label;
-      followSelect.appendChild(option);
-    });
-    followSelect.value = share.followMode || 'inherit';
-    followSelect.addEventListener('change', (e) => {
-      share.followMode = e.target.value;
-      markDirty();
-    });
-    followTd.appendChild(followSelect);
+    if (editing) {
+      const followSelect = document.createElement('select');
+      followSelect.className = 'renin';
+      [
+        { value: 'inherit', label: 'Inherit' },
+        { value: 'true', label: 'Follow' },
+        { value: 'false', label: 'Do not follow' },
+      ].forEach((opt) => {
+        const option = document.createElement('option');
+        option.value = opt.value;
+        option.textContent = opt.label;
+        followSelect.appendChild(option);
+      });
+      followSelect.value = share.followMode || 'inherit';
+      followSelect.addEventListener('change', (e) => {
+        share.followMode = e.target.value;
+        markDirty();
+      });
+      followTd.appendChild(followSelect);
+    } else {
+      followTd.textContent = followModeLabel(share.followMode);
+    }
     tr.appendChild(followTd);
 
-  const rulesTd = document.createElement('td');
-  const rulesBtn = document.createElement('button');
-  rulesBtn.type = 'button';
-  rulesBtn.className = 'btn ghost';
-  rulesBtn.innerHTML = `${iconUse('link')}ACLs`;
-  rulesTd.appendChild(rulesBtn);
-  tr.appendChild(rulesTd);
+    const rulesTd = document.createElement('td');
+    const rulesBtn = document.createElement('button');
+    rulesBtn.type = 'button';
+    rulesBtn.className = 'btn ghost';
+    rulesBtn.innerHTML = `${iconUse('link')}ACLs`;
+    rulesTd.appendChild(rulesBtn);
+    tr.appendChild(rulesTd);
 
-  const actionTd = document.createElement('td');
-  actionTd.style.textAlign = 'right';
+    const actionTd = document.createElement('td');
+    actionTd.style.textAlign = 'right';
+    const editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.className = 'btn ghost';
+    editBtn.innerHTML = editing ? `${iconUse('check')}Done` : `${iconUse('edit')}Edit`;
+    editBtn.addEventListener('click', () => {
+      share.__editing = !editing;
+      renderShares();
+    });
+    actionTd.appendChild(editBtn);
+
     const removeBtn = document.createElement('button');
     removeBtn.type = 'button';
     removeBtn.className = 'btn ghost danger';
@@ -353,7 +381,7 @@ function renderShares() {
 
     rulesBtn.addEventListener('click', () => {
       const hidden = detailRow.classList.toggle('hidden');
-      rulesBtn.innerHTML = hidden ? `${iconUse('link')}Show` : `${iconUse('chevd')}Hide`;
+      rulesBtn.innerHTML = hidden ? `${iconUse('link')}ACLs` : `${iconUse('chevd')}Hide`;
       if (!hidden) {
         detailCell.innerHTML = '';
         const wrap = document.createElement('div');
@@ -394,37 +422,66 @@ function renderAclList(container, list, opts = {}) {
     const tbody = document.createElement('tbody');
     list.forEach((acl, idx) => {
       const tr = document.createElement('tr');
+      const editing = Boolean(acl.__editing);
+      if (editing) tr.classList.add('editing');
 
       const pathTd = document.createElement('td');
-      pathTd.appendChild(createTextInput(acl.path, '/photos or /', (val) => {
-        acl.path = val;
-        markDirty();
-      }));
+      if (editing) {
+        pathTd.appendChild(createTextInput(acl.path, '/photos or /', (val) => {
+          acl.path = val;
+          markDirty();
+        }));
+      } else {
+        pathTd.textContent = formatPathLabel(acl.path);
+      }
       tr.appendChild(pathTd);
 
       const readTd = document.createElement('td');
-      readTd.appendChild(createListInput('', acl.read || [], (vals) => {
-        acl.read = vals;
-        markDirty();
-      }, true));
+      if (editing) {
+        readTd.appendChild(createListInput('', acl.read || [], (vals) => {
+          acl.read = vals;
+          markDirty();
+        }, true));
+      } else {
+        readTd.textContent = formatValueList(acl.read);
+      }
       tr.appendChild(readTd);
 
       const writeTd = document.createElement('td');
-      writeTd.appendChild(createListInput('', acl.write || [], (vals) => {
-        acl.write = vals;
-        markDirty();
-      }, true));
+      if (editing) {
+        writeTd.appendChild(createListInput('', acl.write || [], (vals) => {
+          acl.write = vals;
+          markDirty();
+        }, true));
+      } else {
+        writeTd.textContent = formatValueList(acl.write);
+      }
       tr.appendChild(writeTd);
 
       const adminTd = document.createElement('td');
-      adminTd.appendChild(createListInput('', acl.admin || [], (vals) => {
-        acl.admin = vals;
-        markDirty();
-      }, true));
+      if (editing) {
+        adminTd.appendChild(createListInput('', acl.admin || [], (vals) => {
+          acl.admin = vals;
+          markDirty();
+        }, true));
+      } else {
+        adminTd.textContent = formatValueList(acl.admin);
+      }
       tr.appendChild(adminTd);
 
       const actionTd = document.createElement('td');
       actionTd.style.textAlign = 'right';
+
+      const editBtn = document.createElement('button');
+      editBtn.type = 'button';
+      editBtn.className = 'btn ghost';
+      editBtn.innerHTML = editing ? `${iconUse('check')}Done` : `${iconUse('edit')}Edit`;
+      editBtn.addEventListener('click', () => {
+        acl.__editing = !editing;
+        renderAclList(container, list, opts);
+      });
+      actionTd.appendChild(editBtn);
+
       const remove = document.createElement('button');
       remove.type = 'button';
       remove.className = 'btn ghost danger';
@@ -450,7 +507,7 @@ function renderAclList(container, list, opts = {}) {
   addBtn.className = 'btn ghost';
   addBtn.innerHTML = `${iconUse('newfolder')}${opts.addLabel || 'Add rule'}`;
   addBtn.addEventListener('click', () => {
-    list.push({ path: '/', read: ['*'], write: [], admin: [] });
+    list.push({ path: '/', read: ['*'], write: [], admin: [], __editing: true });
     renderAclList(container, list, opts);
     markDirty();
   });
@@ -494,6 +551,28 @@ function parseList(str) {
     .filter(Boolean);
 }
 
+function formatValueList(values, empty = '--') {
+  if (Array.isArray(values)) {
+    return values.length ? values.join(', ') : empty;
+  }
+  if (typeof values === 'string') {
+    const parsed = parseList(values);
+    return parsed.length ? parsed.join(', ') : empty;
+  }
+  return empty;
+}
+
+function followModeLabel(mode) {
+  switch (mode) {
+    case 'true':
+      return 'Follow';
+    case 'false':
+      return 'Do not follow';
+    default:
+      return 'Inherit';
+  }
+}
+
 function addShare() {
   if (!state.config) return;
   const share = {
@@ -503,6 +582,7 @@ function addShare() {
     stateDir: '',
     followMode: 'inherit',
     acls: [],
+    __editing: true,
   };
   state.shareList.push(share);
   renderShares();
@@ -520,6 +600,7 @@ function sharesMapToList(map) {
       stateDir: sh.stateDir || '',
       followMode: typeof sh.followSymlinks === 'boolean' ? (sh.followSymlinks ? 'true' : 'false') : 'inherit',
       acls: normalizeAclList(sh.acls),
+      __editing: false,
     };
   });
 }
@@ -531,6 +612,7 @@ function normalizeAclList(list) {
     read: Array.isArray(acl.read) ? [...acl.read] : [],
     write: Array.isArray(acl.write) ? [...acl.write] : [],
     admin: Array.isArray(acl.admin) ? [...acl.admin] : [],
+    __editing: false,
   }));
 }
 
@@ -620,6 +702,10 @@ function formatPath(path) {
   const trimmed = String(path || '').trim();
   if (!trimmed || trimmed === '/') return '/';
   return `/${trimmed.replace(/^\/+/, '').replace(/\/+$/, '')}`;
+}
+
+function formatPathLabel(path) {
+  return formatPath(path || '/');
 }
 
 async function saveConfig() {

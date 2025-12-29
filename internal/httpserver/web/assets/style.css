@@ -97,28 +97,28 @@ body{
   border-bottom:1px solid var(--line);
 }
 .brand{
-  display:flex;
+  display:inline-flex;
   align-items:center;
-  gap:8px;
+  gap:0;
   text-decoration:none;
-  color:var(--text);
+  color:var(--muted);
   font-weight:700;
   letter-spacing:.1px;
-  padding:4px 4px 4px 0;
-  border-radius:8px;
+  padding:4px 0;
   user-select:none;
   white-space:nowrap;
+  transition:color .15s ease;
 }
-.brand:hover{background:rgba(9,105,218,.08)}
-.logo{
-  width:32px;height:32px;
-  border-radius:50%;
-  display:grid;
-  place-items:center;
-  border:1px solid var(--line);
-  background:var(--panel);
+.brand:hover,
+.brand:focus-visible{
+  color:var(--accent);
+  text-decoration:underline;
+  text-decoration-color:rgba(9,105,218,.45);
+  text-underline-offset:3px;
+  outline:none;
 }
-.logo-i{color:var(--accent)}
+.logo{display:none}
+.logo-i{display:none}
 .word{font-size:14px}
 
 .crumbs{
@@ -1065,13 +1065,12 @@ body.wide .tilemeta{
 /* admin */
 .admin-page .main{
   max-width:1120px;
-  padding:24px 16px 48px 16px;
+  padding:40px 16px 48px 16px;
   margin:0 auto;
 }
 .admin-shell{
   display:grid;
   grid-template-columns:260px minmax(0, 1fr);
-  border:1px solid var(--line);
   border-radius:12px;
   background:var(--panel);
   box-shadow:var(--shadow2);
@@ -1223,6 +1222,12 @@ body.wide .tilemeta{
 .admin-table td{
   padding:10px 8px;
   border-bottom:1px solid var(--line);
+  vertical-align:top;
+}
+.admin-table tr.editing{
+  background:rgba(9,105,218,.05);
+}
+.admin-table tr.editing td{
   vertical-align:top;
 }
 .admin-table tr:last-child td{border-bottom:none}

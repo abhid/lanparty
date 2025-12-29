@@ -857,10 +857,11 @@ function prepareTokenRevoke(prefix) {
   toast('Paste full token to revoke', 'info', prefix ? `${prefix}…` : '');
 }
 
-function copyToken() {
-  if (!els.tokenOutput?.value) return;
-  copyText(els.tokenOutput.value);
-  toast('Token copied', 'ok');
+async function copyToken() {
+  const value = els.tokenOutput?.value;
+  if (!value) return;
+  const ok = await copyText(value);
+  toast(ok ? 'Token copied' : 'Copy failed', ok ? 'ok' : 'err');
 }
 
 async function generateBcrypt() {
@@ -892,26 +893,37 @@ async function generateBcrypt() {
   }
 }
 
-function copyBcrypt() {
-  if (!els.bcryptOutput?.value) return;
-  copyText(els.bcryptOutput.value);
-  toast('Hash copied', 'ok');
+async function copyBcrypt() {
+  const value = els.bcryptOutput?.value;
+  if (!value) return;
+  const ok = await copyText(value);
+  toast(ok ? 'Hash copied' : 'Copy failed', ok ? 'ok' : 'err');
 }
 
-function copyText(text) {
+async function copyText(text) {
+  if (!text) return false;
   try {
-    navigator.clipboard?.writeText(text);
-    return true;
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
   } catch (_) {
+    // fall back below
+  }
+  try {
     const ta = document.createElement('textarea');
     ta.value = text;
     ta.style.position = 'fixed';
     ta.style.left = '-9999px';
+    ta.style.top = '0';
     document.body.appendChild(ta);
+    ta.focus();
     ta.select();
-    document.execCommand('copy');
+    const ok = document.execCommand('copy');
     ta.remove();
-    return true;
+    return ok;
+  } catch (_) {
+    return false;
   }
 }
 

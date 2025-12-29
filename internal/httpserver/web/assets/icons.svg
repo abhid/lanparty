@@ -70,6 +70,12 @@
       <path d="M7 11l5 5l5 -5" />
       <path d="M12 4l0 12" />
   </symbol>
+  <symbol id="layout-grid" viewBox="0 0 24 24">
+      <path d="M4 4h6v6h-6z" />
+      <path d="M14 4h6v6h-6z" />
+      <path d="M4 14h6v6h-6z" />
+      <path d="M14 14h6v6h-6z" />
+  </symbol>
   <symbol id="wide" viewBox="0 0 24 24">
       <path d="M4 6a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2l0 -12" />
       <path d="M15 4l0 16" />

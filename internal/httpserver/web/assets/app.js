@@ -144,10 +144,34 @@ function fmtSize(n) {
   return `${x.toFixed(x < 10 ? 1 : 0)} ${u[i]}`;
 }
 
+const relTimeFmt = (typeof Intl !== "undefined" && Intl.RelativeTimeFormat) ? new Intl.RelativeTimeFormat(undefined, {numeric: "auto"}) : null;
+const relTimeUnits = [
+  {unit: "year", seconds: 60 * 60 * 24 * 365},
+  {unit: "month", seconds: 60 * 60 * 24 * 30},
+  {unit: "week", seconds: 60 * 60 * 24 * 7},
+  {unit: "day", seconds: 60 * 60 * 24},
+  {unit: "hour", seconds: 60 * 60},
+  {unit: "minute", seconds: 60},
+  {unit: "second", seconds: 1},
+];
+
 function fmtTime(ts) {
-  if (!ts) return "";
+  if (!ts) return {label: "", title: ""};
   const d = new Date(ts * 1000);
-  return d.toLocaleString();
+  const absDate = d.toLocaleDateString();
+  const absTime = d.toLocaleTimeString([], {hour: "numeric", minute: "2-digit", second: "2-digit"});
+  const title = `${absDate} ${absTime}`;
+  let label = title;
+  if (relTimeFmt) {
+    const diffSeconds = Math.round((d.getTime() - Date.now()) / 1000);
+    for (const part of relTimeUnits) {
+      if (Math.abs(diffSeconds) >= part.seconds || part.unit === "second") {
+        label = relTimeFmt.format(Math.round(diffSeconds / part.seconds), part.unit);
+        break;
+      }
+    }
+  }
+  return {label, title};
 }
 
 function setStatus(msg) {
@@ -1683,7 +1707,14 @@ async function openPreview(item, opts = {}) {
           tdSize.textContent = fmtSize(Number(e.size || 0));
           const tdMt = document.createElement("td");
           tdMt.className = "right";
-          tdMt.textContent = e.mtime ? fmtTime(Number(e.mtime)) : "";
+          if (e.mtime) {
+            const mtInfo = fmtTime(Number(e.mtime));
+            tdMt.textContent = mtInfo.label;
+            tdMt.title = mtInfo.title;
+          } else {
+            tdMt.textContent = "";
+            tdMt.removeAttribute("title");
+          }
           const tdAct = document.createElement("td");
           tdAct.className = "right";
           const a = document.createElement("a");
@@ -1812,7 +1843,9 @@ function rowFor(item) {
 
   const mtime = document.createElement("div");
   mtime.className = "meta right";
-  mtime.textContent = fmtTime(item.mtime);
+  const mtimeInfo = fmtTime(item.mtime);
+  mtime.textContent = mtimeInfo.label;
+  mtime.title = mtimeInfo.title || "";
 
   el.appendChild(namecell);
   el.appendChild(size);
@@ -2016,11 +2049,14 @@ function rowForTile(item) {
 
   const meta = document.createElement("div");
   meta.className = "tilemeta";
+  const tileTime = fmtTime(item.mtime);
   if (item.isDir) {
-    meta.textContent = fmtTime(item.mtime);
+    meta.textContent = tileTime.label;
   } else {
-    meta.textContent = `${fmtSize(item.size)} · ${fmtTime(item.mtime)}`;
+    const timeLabel = tileTime.label;
+    meta.textContent = timeLabel ? `${fmtSize(item.size)} · ${timeLabel}` : fmtSize(item.size);
   }
+  if (tileTime.title) meta.title = tileTime.title;
   namewrap.appendChild(meta);
 
   namecell.appendChild(namewrap);

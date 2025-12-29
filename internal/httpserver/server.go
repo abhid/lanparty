@@ -183,7 +183,7 @@ func (s safeWebDAVFS) Stat(ctx context.Context, name string) (os.FileInfo, error
 	return os.Stat(abs)
 }
 
-//go:embed web/index.html web/admin.html web/assets/* web/assets/fonts/*
+//go:embed web/index.html web/admin.html web/unauthorized.html web/assets/* web/assets/fonts/*
 var embeddedWeb embed.FS
 
 func New(opts Options) (*Server, error) {
@@ -396,6 +396,19 @@ func (s *Server) Handler() http.Handler {
 			http.NotFound(w, r)
 			return
 		}
+		ok, err := s.allowed(r, auth.PermAdmin, "/")
+		if err != nil {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		if !ok {
+			if s.shouldChallenge(r) {
+				s.authChallenge(w)
+			} else {
+				http.Redirect(w, r, "/unauthorized", http.StatusFound)
+			}
+			return
+		}
 		b, err := fs.ReadFile(s.webFS, "admin.html")
 		if err != nil {
 			http.Error(w, "missing admin ui", http.StatusInternalServerError)
@@ -404,6 +417,20 @@ func (s *Server) Handler() http.Handler {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(b)
 	}), func(r *http.Request) bool { return r.URL.Path == "/admin" }))
+
+	inner.Handle("/unauthorized", gzipIfAccepted(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/unauthorized" {
+			http.NotFound(w, r)
+			return
+		}
+		b, err := fs.ReadFile(s.webFS, "unauthorized.html")
+		if err != nil {
+			http.Error(w, "missing unauthorized ui", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(b)
+	}), func(r *http.Request) bool { return r.URL.Path == "/unauthorized" }))
 
 	// file serving with Range
 	inner.Handle("/f/", s.require(auth.PermRead, http.HandlerFunc(s.handleFile)))

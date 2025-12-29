@@ -138,6 +138,22 @@ function updateStatusText() {
   statusEl.textContent = s > 0 ? `${statusBase} · ${s} selected` : statusBase;
 }
 
+function pruneToasts() {
+  if (!toasts) return;
+  while (toasts.children.length > 4) {
+    // Prefer dropping non-confirm toasts first so we don't strand pending confirmations.
+    let victim = null;
+    for (const ch of toasts.children) {
+      if (!ch.classList?.contains("confirm")) {
+        victim = ch;
+        break;
+      }
+    }
+    if (!victim) victim = toasts.firstElementChild;
+    victim?.remove();
+  }
+}
+
 function toast(msg, opts = {}) {
   if (!toasts) return;
   const type = opts.type || "ok"; // ok|err|info
@@ -189,9 +205,7 @@ function toast(msg, opts = {}) {
   el.onclick = () => el.remove();
 
   toasts.appendChild(el);
-  while (toasts.children.length > 4) {
-    toasts.firstElementChild?.remove();
-  }
+  pruneToasts();
   if (dur > 0) {
     window.setTimeout(() => {
       if (el.isConnected) el.remove();
@@ -522,11 +536,13 @@ function confirmToast(msg, opts = {}) {
   const iconId = opts.icon || "trash";
 
   return new Promise((resolve) => {
+    let mo = null;
     let done = false;
     const finish = (v) => {
       if (done) return;
       done = true;
-      el.remove();
+      try { mo?.disconnect(); } catch {}
+      if (el.isConnected) el.remove();
       resolve(v);
     };
 
@@ -599,9 +615,13 @@ function confirmToast(msg, opts = {}) {
     };
 
     toasts.appendChild(el);
-    while (toasts.children.length > 4) {
-      toasts.firstElementChild?.remove();
-    }
+    // If this toast gets removed externally (e.g. pruned due to >4 toasts),
+    // resolve as "cancel" so callers don't hang indefinitely.
+    mo = new MutationObserver(() => {
+      if (!el.isConnected) finish(false);
+    });
+    try { mo.observe(toasts, {childList: true}); } catch {}
+    pruneToasts();
 
     // Focus the destructive action for quick keyboard flow.
     window.setTimeout(() => {

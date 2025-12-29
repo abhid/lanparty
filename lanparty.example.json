@@ -12,7 +12,6 @@
   "tokens": {
     "REPLACE_WITH_RANDOM_TOKEN_FOR_AUTOMATION": "alice"
   },
-
   "acls": [
     {
       "path": "/",

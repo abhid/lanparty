@@ -41,6 +41,7 @@ type Config struct {
 	// - no-auth mode: allow read+write
 	// - auth mode: allow read to all authenticated users, deny write
 	ACLs []ACL `json:"acls,omitempty"`
+
 }
 
 // Share is a virtual root mounted under /s/<name>/.

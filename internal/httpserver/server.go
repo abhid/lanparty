@@ -2,11 +2,11 @@ package httpserver
 
 import (
 	"archive/zip"
-	"context"
 	"compress/gzip"
+	"context"
 	"crypto/rand"
-	"encoding/base64"
 	"embed"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,8 +25,8 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/net/webdav"
 	"golang.org/x/crypto/bcrypt"
+	"golang.org/x/net/webdav"
 
 	"lanparty/internal/auth"
 	"lanparty/internal/config"
@@ -53,8 +53,8 @@ func shareFromContext(ctx context.Context) string {
 }
 
 type Server struct {
-	cfg config.Config
-	cfgMu sync.RWMutex
+	cfg     config.Config
+	cfgMu   sync.RWMutex
 	cfgPath string
 
 	mu       sync.Mutex
@@ -422,6 +422,7 @@ func (s *Server) Handler() http.Handler {
 	inner.Handle("/api/write", http.HandlerFunc(s.handleWrite))
 	inner.Handle("/api/admin/bcrypt", http.HandlerFunc(s.handleAdminBcrypt))
 	inner.Handle("/api/admin/state", http.HandlerFunc(s.handleAdminState))
+	inner.Handle("/api/admin/config", http.HandlerFunc(s.handleAdminConfig))
 	inner.Handle("/api/admin/users", http.HandlerFunc(s.handleAdminUsers))
 	inner.Handle("/api/admin/tokens", http.HandlerFunc(s.handleAdminTokens))
 	inner.Handle("/api/upload", s.require(auth.PermWrite, http.HandlerFunc(s.handleMultipartUpload)))
@@ -615,15 +616,15 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 }
 
 type listItem struct {
-	Name  string `json:"name"`
-	Path  string `json:"path"` // rel
-	IsDir bool   `json:"isDir"`
-	IsLink bool  `json:"isLink,omitempty"`
+	Name   string `json:"name"`
+	Path   string `json:"path"` // rel
+	IsDir  bool   `json:"isDir"`
+	IsLink bool   `json:"isLink,omitempty"`
 	LinkTo string `json:"linkTo,omitempty"`
-	Size  int64  `json:"size"`
-	Mtime int64  `json:"mtime"`
-	Mime  string `json:"mime,omitempty"`
-	Thumb string `json:"thumb,omitempty"`
+	Size   int64  `json:"size"`
+	Mtime  int64  `json:"mtime"`
+	Mime   string `json:"mime,omitempty"`
+	Thumb  string `json:"thumb,omitempty"`
 }
 
 type readmeInfo struct {
@@ -677,9 +678,9 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		childAbs := filepath.Join(abs, name)
 		isLink := (e.Type() & os.ModeSymlink) != 0
 		it := listItem{
-			Name:  name,
-			Path:  childRel,
-			IsDir: e.IsDir(),
+			Name:   name,
+			Path:   childRel,
+			IsDir:  e.IsDir(),
 			IsLink: isLink,
 		}
 		if info != nil && err == nil {
@@ -1211,6 +1212,72 @@ func (s *Server) handleAdminState(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+type adminConfigPayload struct {
+	Root           string                  `json:"root"`
+	StateDir       string                  `json:"stateDir"`
+	FollowSymlinks bool                    `json:"followSymlinks"`
+	AuthOptional   bool                    `json:"authOptional"`
+	ACLs           []config.ACL            `json:"acls"`
+	Shares         map[string]config.Share `json:"shares"`
+}
+
+func (s *Server) handleAdminConfig(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOnly(w, r) {
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		s.cfgMu.RLock()
+		cfg := s.cfg
+		s.cfgMu.RUnlock()
+		writeJSON(w, map[string]any{
+			"config":     makeAdminConfigPayload(cfg),
+			"persisted":  strings.TrimSpace(s.cfgPath) != "",
+			"configPath": s.cfgPath,
+		})
+	case http.MethodPut:
+		var req adminConfigPayload
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad json", http.StatusBadRequest)
+			return
+		}
+
+		s.cfgMu.RLock()
+		cfg := s.cfg
+		s.cfgMu.RUnlock()
+
+		cfg.Root = strings.TrimSpace(req.Root)
+		cfg.StateDir = strings.TrimSpace(req.StateDir)
+		cfg.AuthOptional = req.AuthOptional
+		cfg.FollowSymlinks = req.FollowSymlinks
+		cfg.ACLs = normalizeACLs(req.ACLs)
+		cfg.Shares = cloneShareMap(req.Shares)
+
+		normalized, err := normalizeConfig(cfg)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := s.persistConfig(normalized); err != nil {
+			http.Error(w, fmt.Sprintf("persist config: %v", err), http.StatusInternalServerError)
+			return
+		}
+		s.cfgMu.Lock()
+		s.cfg = normalized
+		s.cfgMu.Unlock()
+		s.resetShareCaches()
+
+		writeJSON(w, map[string]any{
+			"ok":         true,
+			"config":     makeAdminConfigPayload(normalized),
+			"persisted":  strings.TrimSpace(s.cfgPath) != "",
+			"configPath": s.cfgPath,
+		})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 	if !s.adminOnly(w, r) {
 		return
@@ -1356,6 +1423,196 @@ func (s *Server) handleAdminTokens(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func makeAdminConfigPayload(cfg config.Config) adminConfigPayload {
+	return adminConfigPayload{
+		Root:           cfg.Root,
+		StateDir:       cfg.StateDir,
+		FollowSymlinks: cfg.FollowSymlinks,
+		AuthOptional:   cfg.AuthOptional,
+		ACLs:           cloneACLs(cfg.ACLs),
+		Shares:         cloneShareMap(cfg.Shares),
+	}
+}
+
+func cloneShareMap(in map[string]config.Share) map[string]config.Share {
+	if len(in) == 0 {
+		return map[string]config.Share{}
+	}
+	out := make(map[string]config.Share, len(in))
+	for name, sh := range in {
+		cp := sh
+		cp.ACLs = cloneACLs(sh.ACLs)
+		out[name] = cp
+	}
+	return out
+}
+
+func cloneACLs(in []config.ACL) []config.ACL {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]config.ACL, len(in))
+	for i, a := range in {
+		out[i] = config.ACL{
+			Path:  a.Path,
+			Read:  cloneStringSlice(a.Read),
+			Write: cloneStringSlice(a.Write),
+			Admin: cloneStringSlice(a.Admin),
+		}
+	}
+	return out
+}
+
+func cloneStringSlice(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, len(in))
+	copy(out, in)
+	return out
+}
+
+func normalizeACLs(in []config.ACL) []config.ACL {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]config.ACL, 0, len(in))
+	for _, acl := range in {
+		path := strings.TrimSpace(acl.Path)
+		if path == "" || path == "/" {
+			path = "/"
+		} else {
+			path = "/" + strings.Trim(strings.Trim(path, " "), "/")
+		}
+		out = append(out, config.ACL{
+			Path:  path,
+			Read:  cleanStringSlice(acl.Read),
+			Write: cleanStringSlice(acl.Write),
+			Admin: cleanStringSlice(acl.Admin),
+		})
+	}
+	return out
+}
+
+func cleanStringSlice(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(in))
+	for _, v := range in {
+		t := strings.TrimSpace(v)
+		if t == "" {
+			continue
+		}
+		out = append(out, t)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func normalizeConfig(cfg config.Config) (config.Config, error) {
+	cfg.Root = strings.TrimSpace(cfg.Root)
+	cfg.StateDir = strings.TrimSpace(cfg.StateDir)
+	if cfg.Root == "" && len(cfg.Shares) == 0 {
+		return cfg, errors.New("configure a root path or at least one share")
+	}
+
+	if cfg.Root != "" {
+		absRoot, err := filepath.Abs(cfg.Root)
+		if err != nil {
+			return cfg, fmt.Errorf("abs root: %w", err)
+		}
+		cfg.Root = absRoot
+
+		stateDir := cfg.StateDir
+		if stateDir == "" {
+			stateDir = filepath.Join(cfg.Root, ".lanparty")
+		} else {
+			stateDir, err = filepath.Abs(stateDir)
+			if err != nil {
+				return cfg, fmt.Errorf("abs state dir: %w", err)
+			}
+		}
+		if err := os.MkdirAll(stateDir, 0o755); err != nil {
+			return cfg, fmt.Errorf("state dir: %w", err)
+		}
+		cfg.StateDir = stateDir
+	} else if cfg.StateDir != "" {
+		stateDir, err := filepath.Abs(cfg.StateDir)
+		if err != nil {
+			return cfg, fmt.Errorf("abs state dir: %w", err)
+		}
+		if err := os.MkdirAll(stateDir, 0o755); err != nil {
+			return cfg, fmt.Errorf("state dir: %w", err)
+		}
+		cfg.StateDir = stateDir
+	}
+
+	cfg.ACLs = normalizeACLs(cfg.ACLs)
+	shares, err := normalizeShares(cfg.Shares)
+	if err != nil {
+		return cfg, err
+	}
+	cfg.Shares = shares
+	return cfg, nil
+}
+
+func normalizeShares(in map[string]config.Share) (map[string]config.Share, error) {
+	if len(in) == 0 {
+		return map[string]config.Share{}, nil
+	}
+	out := make(map[string]config.Share, len(in))
+	for rawName, sh := range in {
+		name := strings.TrimSpace(rawName)
+		if name == "" {
+			return nil, errors.New("share name cannot be empty")
+		}
+		if strings.ContainsAny(name, "/\\#?") {
+			return nil, fmt.Errorf("share %q: name cannot contain /, \\\\, #, or ?", name)
+		}
+		if _, exists := out[name]; exists {
+			return nil, fmt.Errorf("duplicate share name %q", name)
+		}
+
+		root := strings.TrimSpace(sh.Root)
+		if root == "" {
+			return nil, fmt.Errorf("share %q: missing root", name)
+		}
+		absRoot, err := filepath.Abs(root)
+		if err != nil {
+			return nil, fmt.Errorf("share %q: abs root: %w", name, err)
+		}
+		sh.Root = absRoot
+
+		stateDir := strings.TrimSpace(sh.StateDir)
+		if stateDir == "" {
+			stateDir = filepath.Join(sh.Root, ".lanparty")
+		} else {
+			stateDir, err = filepath.Abs(stateDir)
+			if err != nil {
+				return nil, fmt.Errorf("share %q: abs state dir: %w", name, err)
+			}
+		}
+		if err := os.MkdirAll(stateDir, 0o755); err != nil {
+			return nil, fmt.Errorf("share %q: state dir: %w", name, err)
+		}
+		sh.StateDir = stateDir
+		sh.ACLs = normalizeACLs(sh.ACLs)
+		out[name] = sh
+	}
+	return out, nil
+}
+
+func (s *Server) resetShareCaches() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dedup = map[string]*dedup.Store{}
+	s.uploads = map[string]*upload.Manager{}
+	s.davLocks = map[string]webdav.LockSystem{}
 }
 
 func (s *Server) handleCopy(w http.ResponseWriter, r *http.Request) {
@@ -2653,5 +2910,3 @@ func sanitizeZipPath(p string) string {
 	}
 	return p
 }
-
-

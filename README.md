@@ -88,8 +88,8 @@ binary and your data.
 - CLI flags for portable mode, symlink traversal, and version stamping.
 
 #### Admin & automation
-- `/admin` UI to view config state, generate bcrypt hashes, manage users/tokens, and copy bearer tokens.
-- JSON config can be updated dynamically (users/tokens) and persisted to disk.
+- `/admin` UI to edit global settings (root, state dir, ACLs, shares), generate bcrypt hashes, and manage users/tokens entirely from the browser.
+- When lanparty runs with `-config`, changes are saved back to the JSON file so the server and config stay in sync.
 - GitHub Actions build/release pipeline produces cross-platform binaries on every tag.
 
 ### UI tour

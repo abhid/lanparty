@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/rand"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -136,8 +138,13 @@ func main() {
 		cfg.Shares[name] = sh
 	}
 
+	genAdmin, adminUser, adminPass, err := ensureAdminACL(&cfg)
+	if err != nil {
+		log.Fatalf("bootstrap admin: %v", err)
+	}
+
 	srv, err := httpserver.New(httpserver.Options{
-		Config: cfg,
+		Config:     cfg,
 		ConfigPath: *cfgPath,
 	})
 	if err != nil {
@@ -153,6 +160,10 @@ func main() {
 		log.Printf("portable state dir: %s", portableBase)
 	}
 	log.Printf("webdav endpoint: http://%s/dav/  (use BasicAuth if configured)", *addr)
+	if genAdmin {
+		fmt.Printf("[admin] bootstrap credentials for /admin: %s / %s\n", adminUser, adminPass)
+		fmt.Println("         Update your config ACLs to use your own admin account.")
+	}
 	if err := http.ListenAndServe(*addr, withHeaders(srv.Handler())); err != nil {
 		log.Fatalf("listen: %v", err)
 	}
@@ -203,4 +214,52 @@ func withHeaders(next http.Handler) http.Handler {
 	})
 }
 
+func ensureAdminACL(cfg *config.Config) (bool, string, string, error) {
+	if hasAdminACL(cfg) {
+		return false, "", "", nil
+	}
+	user := fmt.Sprintf("admin-%s", randomToken(5))
+	pass := randomToken(10)
+	hash, err := bcrypt.GenerateFromPassword([]byte(pass), bcrypt.DefaultCost)
+	if err != nil {
+		return false, "", "", err
+	}
+	if cfg.Users == nil {
+		cfg.Users = map[string]config.User{}
+	}
+	cfg.Users[user] = config.User{Bcrypt: string(hash)}
+	cfg.ACLs = append(cfg.ACLs, config.ACL{
+		Path:  "/admin",
+		Read:  []string{user},
+		Write: []string{user},
+		Admin: []string{user},
+	})
+	return true, user, pass, nil
+}
 
+func hasAdminACL(cfg *config.Config) bool {
+	for _, acl := range cfg.ACLs {
+		path := strings.TrimSpace(acl.Path)
+		if path == "" {
+			path = "/"
+		} else if !strings.HasPrefix(path, "/") {
+			path = "/" + path
+		}
+		if path == "/admin" && len(acl.Admin) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func randomToken(n int) string {
+	if n <= 0 {
+		n = 8
+	}
+	byteLen := (n*6 + 7) / 8
+	b := make([]byte, byteLen)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%0*x", len(b), b)
+	}
+	return base64.RawURLEncoding.EncodeToString(b)[:n]
+}

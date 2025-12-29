@@ -6,7 +6,7 @@
     <title>lanparty · admin</title>
     <link rel="stylesheet" href="/assets/style.css" />
   </head>
-  <body>
+  <body class="admin-page">
     <header class="topbar">
       <a class="brand" href="/" title="lanparty">
         <span class="logo" aria-hidden="true">
@@ -21,243 +21,165 @@
       </a>
     </header>
 
-    <main class="main">
-      <div class="work">
-        <section class="content">
-          <div class="table" style="padding:14px">
-            <h2 style="margin:0 0 8px 0">Admin</h2>
-            <div class="meta" style="margin:0 0 14px 0">
-              This page is intentionally minimal. It helps with user management tasks without leaving the browser.
-            </div>
-            <div class="meta" id="state" style="margin:0 0 14px 0"></div>
+    <main class="admin-shell">
+      <aside class="admin-nav">
+        <div class="nav-head">
+          <h1>Admin</h1>
+          <div id="admin-summary" class="meta"></div>
+          <div id="cfg-status" class="meta">Loading configuration…</div>
+          <div id="cfg-persist" class="meta"></div>
+        </div>
+        <nav class="nav-list">
+          <button type="button" class="nav-item active" data-pane="general">
+            <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#server"></use></svg>
+            Server
+          </button>
+          <button type="button" class="nav-item" data-pane="acls">
+            <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#link"></use></svg>
+            ACLs
+          </button>
+          <button type="button" class="nav-item" data-pane="shares">
+            <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#folders"></use></svg>
+            Shares
+          </button>
+          <button type="button" class="nav-item" data-pane="accounts">
+            <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#user"></use></svg>
+            Users
+          </button>
+          <button type="button" class="nav-item" data-pane="tokens">
+            <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#key"></use></svg>
+            Tokens
+          </button>
+          <button type="button" class="nav-item" data-pane="tools">
+            <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#code"></use></svg>
+            Tools
+          </button>
+        </nav>
+        <div class="nav-actions">
+          <button type="button" class="btn primary" id="cfg-save" disabled>
+            <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#save"></use></svg>
+            Save changes
+          </button>
+          <button type="button" class="btn ghost" id="cfg-discard" disabled>
+            <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#retry"></use></svg>
+            Discard
+          </button>
+        </div>
+      </aside>
 
-            <div class="opbar" style="margin-top:0">
-              <div class="status">bcrypt password hash</div>
-              <div class="spacer"></div>
-            </div>
+      <section class="admin-content">
+        <div class="admin-pane active" data-pane="general">
+          <h2>Server configuration</h2>
+          <div id="cfg-general" class="table-wrap"></div>
+        </div>
 
-            <div style="display:flex; gap:12px; flex-wrap:wrap">
-              <div style="flex:1; min-width:260px">
-                <div class="meta">Password</div>
-                <input id="pw" type="password" class="renin" placeholder="Enter password…" />
-              </div>
-              <div style="width:140px">
-                <div class="meta">Cost</div>
-                <input id="cost" type="number" class="renin" value="10" min="4" max="31" />
-              </div>
-              <div style="display:flex; align-items:flex-end">
-                <button id="gen" class="btn">
-                  <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#code"></use></svg>
-                  Generate
-                </button>
-              </div>
-            </div>
-
-            <div style="margin-top:12px">
-              <div class="meta">Result</div>
-              <textarea id="out" class="pv-pre" style="width:100%; min-height:110px; background:#0b1220" readonly></textarea>
-            </div>
-
-            <div class="meta" style="margin-top:10px">
-              Paste the hash into your config under <code>users</code>. Tip: pair with <code>authOptional</code> + ACLs for public-read/auth-write.
-            </div>
-
-            <hr />
-
-            <h3 style="margin:0 0 10px 0">Users</h3>
-            <div style="display:flex; gap:12px; flex-wrap:wrap">
-              <div style="width:220px">
-                <div class="meta">Username</div>
-                <input id="user" type="text" class="renin" placeholder="alice" />
-              </div>
-              <div style="flex:1; min-width:260px">
-                <div class="meta">Password</div>
-                <input id="userpw" type="password" class="renin" placeholder="Enter password…" />
-              </div>
-              <div style="width:140px">
-                <div class="meta">Cost</div>
-                <input id="usercost" type="number" class="renin" value="10" min="4" max="31" />
-              </div>
-              <div style="display:flex; align-items:flex-end">
-                <button id="mkuser" class="btn">
-                  <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#check"></use></svg>
-                  Save user
-                </button>
-              </div>
-            </div>
-            <div class="meta" style="margin-top:8px">Current users:</div>
-            <ul id="users" class="meta" style="margin:6px 0 0 18px"></ul>
-
-            <hr />
-
-            <h3 style="margin:0 0 10px 0">API tokens (Bearer)</h3>
-            <div style="display:flex; gap:12px; flex-wrap:wrap">
-              <div style="width:220px">
-                <div class="meta">Username</div>
-                <input id="tokuser" type="text" class="renin" placeholder="alice" />
-              </div>
-              <div style="display:flex; align-items:flex-end">
-                <button id="mktok" class="btn">
-                  <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#code"></use></svg>
-                  Create token
-                </button>
-              </div>
-            </div>
-            <div style="margin-top:12px">
-              <div class="meta">New token (copy now)</div>
-              <textarea id="tokout" class="pv-pre" style="width:100%; min-height:70px; background:#0b1220" readonly></textarea>
-            </div>
-            <div style="margin-top:12px; display:flex; gap:12px; flex-wrap:wrap">
-              <div style="flex:1; min-width:260px">
-                <div class="meta">Revoke token</div>
-                <input id="tokrevoke" type="text" class="renin" placeholder="paste token here…" />
-              </div>
-              <div style="display:flex; align-items:flex-end">
-                <button id="revtok" class="btn ghost" type="button">
-                  <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#trash"></use></svg>
-                  Revoke
-                </button>
-              </div>
-            </div>
-            <div class="meta" style="margin-top:8px">Current tokens:</div>
-            <ul id="tokens" class="meta" style="margin:6px 0 0 18px"></ul>
+        <div class="admin-pane" data-pane="acls">
+          <div class="pane-header">
+            <h2>Global ACL rules</h2>
+            <div class="meta">First match wins</div>
           </div>
-        </section>
-      </div>
+          <div id="cfg-acls" class="table-wrap"></div>
+        </div>
+
+        <div class="admin-pane" data-pane="shares">
+          <div class="pane-header">
+            <div>
+              <h2>Shares</h2>
+              <div class="meta">Virtual roots mount at /s/&lt;name&gt;</div>
+            </div>
+            <button type="button" class="btn ghost" id="cfg-share-add">
+              <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#newfolder"></use></svg>
+              Add share
+            </button>
+          </div>
+          <div id="cfg-shares" class="table-wrap"></div>
+        </div>
+
+        <div class="admin-pane" data-pane="accounts">
+          <div class="pane-header">
+            <h2>Users</h2>
+          </div>
+          <div class="form-inline">
+            <input id="user-name" type="text" class="renin" placeholder="Username" />
+            <input id="user-pass" type="password" class="renin" placeholder="Password" />
+            <input id="user-cost" type="number" class="renin narrow" value="10" min="4" max="31" />
+            <button type="button" class="btn" id="user-save">
+              <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#check"></use></svg>
+              Save user
+            </button>
+          </div>
+          <div id="users-empty" class="meta muted">No users yet.</div>
+          <div id="users-list" class="table-wrap"></div>
+        </div>
+
+        <div class="admin-pane" data-pane="tokens">
+          <div class="pane-header">
+            <h2>Tokens</h2>
+          </div>
+          <div class="form-inline">
+            <input id="tok-user" type="text" class="renin" placeholder="Username for token" />
+            <button type="button" class="btn" id="tok-create">
+              <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#code"></use></svg>
+              Create token
+            </button>
+            <textarea id="tok-output" class="mono-field" readonly placeholder="New token appears here"></textarea>
+            <button type="button" class="btn ghost" id="tok-copy" disabled>
+              <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#copy"></use></svg>
+              Copy
+            </button>
+          </div>
+          <div class="form-inline">
+            <input id="tok-revoke" type="text" class="renin" placeholder="Paste full token to revoke" />
+            <button type="button" class="btn ghost danger" id="tok-revoke-btn">
+              <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#trash"></use></svg>
+              Revoke
+            </button>
+          </div>
+          <div id="tokens-empty" class="meta muted">No tokens yet.</div>
+          <div id="tokens-list" class="table-wrap"></div>
+        </div>
+
+        <div class="admin-pane" data-pane="tools">
+          <div class="pane-header">
+            <h2>Bcrypt generator</h2>
+          </div>
+          <table class="admin-table form-table">
+            <tbody>
+              <tr>
+                <th>Password</th>
+                <td><input id="bcrypt-pass" type="password" class="renin" placeholder="Enter password…" /></td>
+              </tr>
+              <tr>
+                <th>Cost</th>
+                <td><input id="bcrypt-cost" type="number" class="renin narrow" value="10" min="4" max="31" /></td>
+              </tr>
+              <tr>
+                <th>Actions</th>
+                <td>
+                  <div class="form-inline">
+                    <button type="button" class="btn" id="bcrypt-generate">
+                      <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#code"></use></svg>
+                      Generate hash
+                    </button>
+                    <button type="button" class="btn ghost" id="bcrypt-copy" disabled>
+                      <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#copy"></use></svg>
+                      Copy hash
+                    </button>
+                  </div>
+                </td>
+              </tr>
+              <tr>
+                <th>Result</th>
+                <td><textarea id="bcrypt-output" class="mono-field" readonly placeholder="Hash appears here"></textarea></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
     </main>
 
     <div class="toasts" id="toasts" aria-live="polite" aria-relevant="additions"></div>
-
-    <script>
-      // share-aware base path:
-      // - default share: ""
-      // - named share:  "/s/<share>"
-      const BASE = (() => {
-        try {
-          const p = String(location.pathname || "/");
-          const m = p.match(/^\/s\/([^/]+)(?:\/|$)/);
-          if (m && m[1]) return `/s/${m[1]}`;
-        } catch {}
-        return "";
-      })();
-      const $ = (id) => document.getElementById(id);
-      const toasts = $("toasts");
-      const iconUse = (id) => `<svg class="i" aria-hidden="true"><use href="/assets/icons.svg#${id}"></use></svg>`;
-      function toast(msg, type="ok", sub="", dur=2600) {
-        if (!toasts) return;
-        const el = document.createElement("div");
-        el.className = `toast ${type}`;
-        el.innerHTML = `<div class="trow"><div class="ti">${iconUse(type==="err"?"close":"check")}</div><div class="msg">${msg}${sub?`<div class="sub">${sub}</div>`:""}</div><button class="x" type="button">${iconUse("close")}</button></div>`;
-        el.querySelector(".x").onclick = () => el.remove();
-        el.onclick = () => el.remove();
-        toasts.appendChild(el);
-        if (dur > 0) setTimeout(()=>el.isConnected && el.remove(), dur);
-      }
-
-      async function refreshState() {
-        try {
-          const res = await fetch(`${BASE}/api/admin/state`);
-          if (!res.ok) throw new Error(await res.text());
-          const j = await res.json();
-          $("state").textContent = `users: ${(j.users||[]).length} · tokens: ${(j.tokens||[]).length}` + (j.persisted ? "" : " · (not persisted)");
-          const ul = $("users");
-          ul.innerHTML = "";
-          for (const u of (j.users||[])) {
-            const li = document.createElement("li");
-            li.textContent = u;
-            ul.appendChild(li);
-          }
-          const tl = $("tokens");
-          tl.innerHTML = "";
-          for (const t of (j.tokens||[])) {
-            const li = document.createElement("li");
-            li.textContent = `${t.tokenPrefix}… → ${t.user}`;
-            tl.appendChild(li);
-          }
-        } catch (e) {
-          $("state").textContent = `state failed: ${String(e)}`;
-        }
-      }
-
-      $("gen").onclick = async () => {
-        const pw = $("pw").value || "";
-        const cost = Number($("cost").value || "10");
-        if (!pw) { toast("Missing password", "err"); return; }
-        try {
-          const res = await fetch(`${BASE}/api/admin/bcrypt`, {
-            method: "POST",
-            headers: {"Content-Type":"application/json"},
-            body: JSON.stringify({password: pw, cost}),
-          });
-          if (!res.ok) throw new Error(await res.text());
-          const j = await res.json();
-          $("out").value = j.bcrypt || "";
-          toast("Generated bcrypt hash", "ok");
-        } catch (e) {
-          toast("Failed", "err", String(e), 4500);
-        }
-      };
-
-      $("mkuser").onclick = async () => {
-        const u = ($("user").value || "").trim();
-        const pw = $("userpw").value || "";
-        const cost = Number($("usercost").value || "10");
-        if (!u) { toast("Missing username", "err"); return; }
-        if (!pw) { toast("Missing password", "err"); return; }
-        try {
-          const res = await fetch(`${BASE}/api/admin/users`, {
-            method: "POST",
-            headers: {"Content-Type":"application/json"},
-            body: JSON.stringify({username: u, password: pw, cost}),
-          });
-          if (!res.ok) throw new Error(await res.text());
-          const j = await res.json();
-          $("out").value = j.bcrypt || "";
-          toast("User saved", "ok", u);
-          await refreshState();
-        } catch (e) {
-          toast("User save failed", "err", String(e), 4500);
-        }
-      };
-
-      $("mktok").onclick = async () => {
-        const u = ($("tokuser").value || "").trim();
-        if (!u) { toast("Missing username", "err"); return; }
-        try {
-          const res = await fetch(`${BASE}/api/admin/tokens`, {
-            method: "POST",
-            headers: {"Content-Type":"application/json"},
-            body: JSON.stringify({username: u}),
-          });
-          if (!res.ok) throw new Error(await res.text());
-          const j = await res.json();
-          $("tokout").value = j.token || "";
-          toast("Token created", "ok", u);
-          await refreshState();
-        } catch (e) {
-          toast("Token failed", "err", String(e), 4500);
-        }
-      };
-
-      $("revtok").onclick = async () => {
-        const tok = ($("tokrevoke").value || "").trim();
-        if (!tok) { toast("Missing token", "err"); return; }
-        try {
-          const res = await fetch(`${BASE}/api/admin/tokens`, {
-            method: "DELETE",
-            headers: {"Content-Type":"application/json"},
-            body: JSON.stringify({token: tok}),
-          });
-          if (!res.ok) throw new Error(await res.text());
-          toast("Token revoked", "ok");
-          await refreshState();
-        } catch (e) {
-          toast("Revoke failed", "err", String(e), 4500);
-        }
-      };
-
-      refreshState();
-    </script>
+    <script type="module" src="/assets/admin.js"></script>
   </body>
 </html>
 

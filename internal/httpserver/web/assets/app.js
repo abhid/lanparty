@@ -107,6 +107,22 @@ function encPath(rel) {
   return rel.split("/").map(encodeURIComponent).join("/");
 }
 
+function decodeHashRel(raw) {
+  if (!raw) return "";
+  return raw.split("/").filter(Boolean).map((seg) => {
+    try {
+      return decodeURIComponent(seg);
+    } catch {
+      return seg;
+    }
+  }).join("/");
+}
+
+function encodeHashRel(rel) {
+  if (!rel) return "";
+  return rel.split("/").filter(Boolean).map(encodeURIComponent).join("/");
+}
+
 function curPath() {
   return parseView().rel;
 }
@@ -119,7 +135,8 @@ function parseView() {
   const h = (location.hash || "#/").slice(1); // "/path?...”
   if (!h.startsWith("/")) return {rel: "", q: ""};
   const [pathPart, queryPart] = h.split("?", 2);
-  const rel = (pathPart || "/").slice(1).replace(/^\/+/, "");
+  const rawRel = (pathPart || "/").slice(1).replace(/^\/+/, "");
+  const rel = rawRel ? decodeHashRel(rawRel) : "";
   const sp = new URLSearchParams(queryPart || "");
   const q = (sp.get("q") || "").trim();
   return {rel, q};
@@ -127,11 +144,12 @@ function parseView() {
 
 function setView(rel, q) {
   rel = (rel || "").replace(/^\/+/, "");
+  const encodedRel = encodeHashRel(rel);
   const sp = new URLSearchParams();
   const qq = (q || "").trim();
   if (qq) sp.set("q", qq);
   const qs = sp.toString();
-  location.hash = "#/" + rel + (qs ? `?${qs}` : "");
+  location.hash = "#/" + encodedRel + (qs ? `?${qs}` : "");
 }
 
 function fmtSize(n) {

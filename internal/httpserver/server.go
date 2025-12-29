@@ -396,7 +396,7 @@ func (s *Server) Handler() http.Handler {
 			http.NotFound(w, r)
 			return
 		}
-		ok, err := s.allowed(r, auth.PermAdmin, "/")
+		ok, err := s.allowed(r, auth.PermAdmin, "/admin")
 		if err != nil {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return

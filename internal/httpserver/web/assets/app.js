@@ -496,6 +496,21 @@ function choiceToast(msg, opts = {}) {
   });
 }
 
+async function promptUploadConflict(destRel) {
+  const target = destRel || "existing file";
+  return await choiceToast("File already exists", {
+    sub: target,
+    icon: "upload",
+    type: "info",
+    choices: [
+      {value: "rename", label: "Keep both"},
+      {value: "overwrite", label: "Replace", danger: true},
+      {value: "skip", label: "Skip existing"},
+    ],
+    cancelLabel: "Cancel upload",
+  });
+}
+
 async function pasteTo(destDirRel) {
   if (!clip || !Array.isArray(clip.paths) || clip.paths.length === 0) return;
   if (clip.base !== BASE) {
@@ -1279,7 +1294,12 @@ async function apiUploadFinish(id) {
 async function apiUploadCreate2(destRel, size, mode, signal) {
   const url = `${BASE}/api/uploads?path=${encodeURIComponent(destRel)}&size=${encodeURIComponent(size)}&mode=${encodeURIComponent(mode || "overwrite")}`;
   const res = await fetch(url, {method:"POST", signal});
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) {
+    const body = await res.text();
+    const err = new Error(body || res.statusText || "upload create failed");
+    err.status = res.status;
+    throw err;
+  }
   return await res.json();
 }
 
@@ -2695,33 +2715,7 @@ function renderUpq() {
   }
 }
 
-async function pickUploadMode() {
-  let mode = "overwrite";
-  try {
-    const saved = localStorage.getItem("lanpartyUploadMode");
-    if (saved) mode = saved;
-  } catch {}
-  const picked = await choiceToast("Upload options", {
-    sub: "Choose conflict behavior",
-    icon: "upload",
-    type: "info",
-    choices: [
-      {value: "rename", label: "Keep both"},
-      {value: "overwrite", label: "Replace", danger: true},
-      {value: "skip", label: "Skip existing"},
-      {value: "error", label: "Error if exists"},
-    ],
-    cancelLabel: "Cancel",
-  });
-  if (picked == null) return null;
-  mode = picked;
-  try { localStorage.setItem("lanpartyUploadMode", mode); } catch {}
-  return mode;
-}
-
 async function enqueueUploads(files, useRelativePaths) {
-  const mode = await pickUploadMode();
-  if (!mode) return;
   const dir = curPath();
   const list = [...(files || [])].filter((f) => f && f.name);
   for (const f of list) {
@@ -2731,7 +2725,7 @@ async function enqueueUploads(files, useRelativePaths) {
       tid: ++upTid,
       file: f,
       destRel,
-      mode,
+      mode: "error",
       status: "queued",
       sessionId: null,
       offset: 0,
@@ -2808,6 +2802,25 @@ function pumpUploads() {
   }
 }
 
+async function requestUploadSession(t, file) {
+  while (true) {
+    const mode = t.mode || "error";
+    try {
+      return await apiUploadCreate2(t.destRel, file.size, mode, t.ctrl.signal);
+    } catch (err) {
+      if (err && err.status === 409) {
+        const choice = await promptUploadConflict(t.destRel);
+        if (!choice) {
+          return null;
+        }
+        t.mode = choice;
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
 async function runUploadTask(t) {
   const file = t.file;
   if (!file) return;
@@ -2815,7 +2828,13 @@ async function runUploadTask(t) {
   try {
     // Create or resume session.
     if (!t.sessionId) {
-      const sess = await apiUploadCreate2(t.destRel, file.size, t.mode, t.ctrl.signal);
+      const sess = await requestUploadSession(t, file);
+      if (!sess) {
+        t.status = "canceled";
+        t.err = "upload canceled";
+        toast("Upload canceled", {type: "info", sub: t.destRel});
+        return;
+      }
       if (sess && sess.skipped) {
         t.status = "skipped";
         return;

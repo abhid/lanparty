@@ -46,6 +46,9 @@
                 <button class="opbtn" id="op-upload" title="Upload" data-tip="Upload" aria-label="Upload">
                 <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#upload"></use></svg>
                 </button>
+                <button class="opbtn" id="op-upload-dir" title="Upload folder" data-tip="Upload folder" aria-label="Upload folder">
+                <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#folderup"></use></svg>
+                </button>
                 <button class="opbtn" id="op-mkdir" title="New folder" data-tip="New folder" aria-label="New folder">
                 <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#newfolder"></use></svg>
                 </button>
@@ -54,6 +57,15 @@
                 </button>
               </div>
               <div class="opsgrp" aria-label="Selection actions">
+                <button class="opbtn" id="op-copy" title="Copy" data-tip="Copy" aria-label="Copy" disabled>
+                <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#copy"></use></svg>
+                </button>
+                <button class="opbtn" id="op-cut" title="Cut" data-tip="Cut" aria-label="Cut" disabled>
+                <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#cut"></use></svg>
+                </button>
+                <button class="opbtn" id="op-paste" title="Paste" data-tip="Paste" aria-label="Paste" disabled>
+                <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#paste"></use></svg>
+                </button>
                 <button class="opbtn" id="op-zip" title="Download zip" data-tip="Download zip" aria-label="Download zip" disabled>
                 <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#archive"></use></svg>
                 </button>
@@ -62,15 +74,27 @@
                 </button>
               </div>
               <input id="file" type="file" multiple class="hidden" />
+              <input id="filedir" type="file" multiple webkitdirectory directory class="hidden" />
             </div>
           </div>
           <div class="contentgrid" id="contentgrid">
             <div class="listpane">
+              <section class="upq hidden" id="upq" aria-label="Uploads">
+                <div class="uhead">
+                  <div class="utitle">
+                    <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#upload"></use></svg>
+                    Uploads
+                  </div>
+                  <div class="spacer"></div>
+                  <button class="btn ghost" id="upq-clear" type="button" title="Clear finished uploads">Clear</button>
+                </div>
+                <div class="ubody" id="upq-body"></div>
+              </section>
               <div class="table">
                 <div class="thead">
-                  <div>Name</div>
-                  <div class="right">Size</div>
-                  <div class="right">Modified</div>
+                  <div class="sort" data-sort="name" role="button" tabindex="0">Name</div>
+                  <div class="right sort" data-sort="size" role="button" tabindex="0">Size</div>
+                  <div class="right sort" data-sort="mtime" role="button" tabindex="0">Modified</div>
                 </div>
                 <div id="rows" class="tbody"></div>
               </div>
@@ -115,6 +139,8 @@
       <div class="spacer"></div>
       <div class="footnote">
         <a class="link" href="https://github.com/abhid/lanparty" target="_blank" rel="noreferrer">github.com/abhid/lanparty</a>
+        <span> · </span>
+        <a class="link" href="/admin">admin</a>
       </div>
     </footer>
 
@@ -122,6 +148,15 @@
       <div class="backdrop" id="modal-backdrop"></div>
       <div class="dialog" role="dialog" aria-modal="true" aria-label="Preview">
         <div class="mhead">
+          <button class="btn ghost" id="pv-prev" title="Previous" type="button">
+            <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#chevl"></use></svg>
+          </button>
+          <button class="btn ghost" id="pv-next" title="Next" type="button">
+            <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#chevr"></use></svg>
+          </button>
+          <button class="btn ghost" id="pv-slide" title="Slideshow" type="button">
+            <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#play"></use></svg>
+          </button>
           <div class="mtitle" id="pv-title"></div>
           <div class="spacer"></div>
           <a class="btn ghost" id="pv-open" target="_blank" rel="noreferrer">
@@ -132,6 +167,14 @@
             <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#download"></use></svg>
             Download
           </a>
+          <button class="btn ghost" id="pv-edit" type="button" title="Edit (text files)">
+            <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#edit"></use></svg>
+            Edit
+          </button>
+          <button class="btn" id="pv-save" type="button" title="Save" disabled>
+            <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#check"></use></svg>
+            Save
+          </button>
           <button class="btn ghost" id="pv-close">
             <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#close"></use></svg>
             Close

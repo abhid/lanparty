@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>lanparty · admin</title>
+    <link rel="stylesheet" href="/assets/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/" title="lanparty">
+        <span class="logo" aria-hidden="true">
+          <svg class="i logo-i"><use href="/assets/icons.svg#folders"></use></svg>
+        </span>
+        <span class="word">lanparty</span>
+      </a>
+      <div class="spacer"></div>
+      <a class="btn ghost" href="/">
+        <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#open"></use></svg>
+        Back
+      </a>
+    </header>
+
+    <main class="main">
+      <div class="work">
+        <section class="content">
+          <div class="table" style="padding:14px">
+            <h2 style="margin:0 0 8px 0">Admin</h2>
+            <div class="meta" style="margin:0 0 14px 0">
+              This page is intentionally minimal. It helps with user management tasks without leaving the browser.
+            </div>
+            <div class="meta" id="state" style="margin:0 0 14px 0"></div>
+
+            <div class="opbar" style="margin-top:0">
+              <div class="status">bcrypt password hash</div>
+              <div class="spacer"></div>
+            </div>
+
+            <div style="display:flex; gap:12px; flex-wrap:wrap">
+              <div style="flex:1; min-width:260px">
+                <div class="meta">Password</div>
+                <input id="pw" type="password" class="renin" placeholder="Enter password…" />
+              </div>
+              <div style="width:140px">
+                <div class="meta">Cost</div>
+                <input id="cost" type="number" class="renin" value="10" min="4" max="31" />
+              </div>
+              <div style="display:flex; align-items:flex-end">
+                <button id="gen" class="btn">
+                  <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#code"></use></svg>
+                  Generate
+                </button>
+              </div>
+            </div>
+
+            <div style="margin-top:12px">
+              <div class="meta">Result</div>
+              <textarea id="out" class="pv-pre" style="width:100%; min-height:110px; background:#0b1220" readonly></textarea>
+            </div>
+
+            <div class="meta" style="margin-top:10px">
+              Paste the hash into your config under <code>users</code>. Tip: pair with <code>authOptional</code> + ACLs for public-read/auth-write.
+            </div>
+
+            <hr />
+
+            <h3 style="margin:0 0 10px 0">Users</h3>
+            <div style="display:flex; gap:12px; flex-wrap:wrap">
+              <div style="width:220px">
+                <div class="meta">Username</div>
+                <input id="user" type="text" class="renin" placeholder="alice" />
+              </div>
+              <div style="flex:1; min-width:260px">
+                <div class="meta">Password</div>
+                <input id="userpw" type="password" class="renin" placeholder="Enter password…" />
+              </div>
+              <div style="width:140px">
+                <div class="meta">Cost</div>
+                <input id="usercost" type="number" class="renin" value="10" min="4" max="31" />
+              </div>
+              <div style="display:flex; align-items:flex-end">
+                <button id="mkuser" class="btn">
+                  <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#check"></use></svg>
+                  Save user
+                </button>
+              </div>
+            </div>
+            <div class="meta" style="margin-top:8px">Current users:</div>
+            <ul id="users" class="meta" style="margin:6px 0 0 18px"></ul>
+
+            <hr />
+
+            <h3 style="margin:0 0 10px 0">API tokens (Bearer)</h3>
+            <div style="display:flex; gap:12px; flex-wrap:wrap">
+              <div style="width:220px">
+                <div class="meta">Username</div>
+                <input id="tokuser" type="text" class="renin" placeholder="alice" />
+              </div>
+              <div style="display:flex; align-items:flex-end">
+                <button id="mktok" class="btn">
+                  <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#code"></use></svg>
+                  Create token
+                </button>
+              </div>
+            </div>
+            <div style="margin-top:12px">
+              <div class="meta">New token (copy now)</div>
+              <textarea id="tokout" class="pv-pre" style="width:100%; min-height:70px; background:#0b1220" readonly></textarea>
+            </div>
+            <div style="margin-top:12px; display:flex; gap:12px; flex-wrap:wrap">
+              <div style="flex:1; min-width:260px">
+                <div class="meta">Revoke token</div>
+                <input id="tokrevoke" type="text" class="renin" placeholder="paste token here…" />
+              </div>
+              <div style="display:flex; align-items:flex-end">
+                <button id="revtok" class="btn ghost" type="button">
+                  <svg class="i" aria-hidden="true"><use href="/assets/icons.svg#trash"></use></svg>
+                  Revoke
+                </button>
+              </div>
+            </div>
+            <div class="meta" style="margin-top:8px">Current tokens:</div>
+            <ul id="tokens" class="meta" style="margin:6px 0 0 18px"></ul>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <div class="toasts" id="toasts" aria-live="polite" aria-relevant="additions"></div>
+
+    <script>
+      // share-aware base path:
+      // - default share: ""
+      // - named share:  "/s/<share>"
+      const BASE = (() => {
+        try {
+          const p = String(location.pathname || "/");
+          const m = p.match(/^\/s\/([^/]+)(?:\/|$)/);
+          if (m && m[1]) return `/s/${m[1]}`;
+        } catch {}
+        return "";
+      })();
+      const $ = (id) => document.getElementById(id);
+      const toasts = $("toasts");
+      const iconUse = (id) => `<svg class="i" aria-hidden="true"><use href="/assets/icons.svg#${id}"></use></svg>`;
+      function toast(msg, type="ok", sub="", dur=2600) {
+        if (!toasts) return;
+        const el = document.createElement("div");
+        el.className = `toast ${type}`;
+        el.innerHTML = `<div class="trow"><div class="ti">${iconUse(type==="err"?"close":"check")}</div><div class="msg">${msg}${sub?`<div class="sub">${sub}</div>`:""}</div><button class="x" type="button">${iconUse("close")}</button></div>`;
+        el.querySelector(".x").onclick = () => el.remove();
+        el.onclick = () => el.remove();
+        toasts.appendChild(el);
+        if (dur > 0) setTimeout(()=>el.isConnected && el.remove(), dur);
+      }
+
+      async function refreshState() {
+        try {
+          const res = await fetch(`${BASE}/api/admin/state`);
+          if (!res.ok) throw new Error(await res.text());
+          const j = await res.json();
+          $("state").textContent = `users: ${(j.users||[]).length} · tokens: ${(j.tokens||[]).length}` + (j.persisted ? "" : " · (not persisted)");
+          const ul = $("users");
+          ul.innerHTML = "";
+          for (const u of (j.users||[])) {
+            const li = document.createElement("li");
+            li.textContent = u;
+            ul.appendChild(li);
+          }
+          const tl = $("tokens");
+          tl.innerHTML = "";
+          for (const t of (j.tokens||[])) {
+            const li = document.createElement("li");
+            li.textContent = `${t.tokenPrefix}… → ${t.user}`;
+            tl.appendChild(li);
+          }
+        } catch (e) {
+          $("state").textContent = `state failed: ${String(e)}`;
+        }
+      }
+
+      $("gen").onclick = async () => {
+        const pw = $("pw").value || "";
+        const cost = Number($("cost").value || "10");
+        if (!pw) { toast("Missing password", "err"); return; }
+        try {
+          const res = await fetch(`${BASE}/api/admin/bcrypt`, {
+            method: "POST",
+            headers: {"Content-Type":"application/json"},
+            body: JSON.stringify({password: pw, cost}),
+          });
+          if (!res.ok) throw new Error(await res.text());
+          const j = await res.json();
+          $("out").value = j.bcrypt || "";
+          toast("Generated bcrypt hash", "ok");
+        } catch (e) {
+          toast("Failed", "err", String(e), 4500);
+        }
+      };
+
+      $("mkuser").onclick = async () => {
+        const u = ($("user").value || "").trim();
+        const pw = $("userpw").value || "";
+        const cost = Number($("usercost").value || "10");
+        if (!u) { toast("Missing username", "err"); return; }
+        if (!pw) { toast("Missing password", "err"); return; }
+        try {
+          const res = await fetch(`${BASE}/api/admin/users`, {
+            method: "POST",
+            headers: {"Content-Type":"application/json"},
+            body: JSON.stringify({username: u, password: pw, cost}),
+          });
+          if (!res.ok) throw new Error(await res.text());
+          const j = await res.json();
+          $("out").value = j.bcrypt || "";
+          toast("User saved", "ok", u);
+          await refreshState();
+        } catch (e) {
+          toast("User save failed", "err", String(e), 4500);
+        }
+      };
+
+      $("mktok").onclick = async () => {
+        const u = ($("tokuser").value || "").trim();
+        if (!u) { toast("Missing username", "err"); return; }
+        try {
+          const res = await fetch(`${BASE}/api/admin/tokens`, {
+            method: "POST",
+            headers: {"Content-Type":"application/json"},
+            body: JSON.stringify({username: u}),
+          });
+          if (!res.ok) throw new Error(await res.text());
+          const j = await res.json();
+          $("tokout").value = j.token || "";
+          toast("Token created", "ok", u);
+          await refreshState();
+        } catch (e) {
+          toast("Token failed", "err", String(e), 4500);
+        }
+      };
+
+      $("revtok").onclick = async () => {
+        const tok = ($("tokrevoke").value || "").trim();
+        if (!tok) { toast("Missing token", "err"); return; }
+        try {
+          const res = await fetch(`${BASE}/api/admin/tokens`, {
+            method: "DELETE",
+            headers: {"Content-Type":"application/json"},
+            body: JSON.stringify({token: tok}),
+          });
+          if (!res.ok) throw new Error(await res.text());
+          toast("Token revoked", "ok");
+          await refreshState();
+        } catch (e) {
+          toast("Revoke failed", "err", String(e), 4500);
+        }
+      };
+
+      refreshState();
+    </script>
+  </body>
+</html>
+
+

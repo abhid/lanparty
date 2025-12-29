@@ -56,7 +56,7 @@ jobs:
         run: |
           mkdir -p dist
           out="dist/lanparty-${GOOS}-${GOARCH}${{ matrix.ext }}"
-          go build -trimpath -ldflags="-s -w" -o "${out}" ./cmd/lanparty
+          go build -trimpath -ldflags="-s -w -X main.version=${GITHUB_SHA} -X main.commit=${GITHUB_SHA} -X main.builtAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o "${out}" ./cmd/lanparty
           # normalize exec bit for non-windows outputs
           if [ "${GOOS}" != "windows" ]; then chmod +x "${out}"; fi
           sha256sum "${out}" > "${out}.sha256"

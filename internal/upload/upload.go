@@ -29,6 +29,7 @@ import (
 
 type Manager struct {
 	rootAbs  string
+	followSymlinks bool
 	dir      string
 	dedup    *dedup.Store
 	mu       sync.Mutex
@@ -43,13 +44,14 @@ type session struct {
 	Created int64  `json:"created"`
 }
 
-func New(rootAbs, stateDir string, store *dedup.Store) (*Manager, error) {
+func New(rootAbs, stateDir string, store *dedup.Store, followSymlinks bool) (*Manager, error) {
 	dir := filepath.Join(stateDir, "uploads")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
 	m := &Manager{
 		rootAbs:  rootAbs,
+		followSymlinks: followSymlinks,
 		dir:      dir,
 		dedup:    store,
 		sessions: map[string]*session{},
@@ -200,7 +202,7 @@ func (m *Manager) Finish(ctx context.Context, id string) (dstAbs string, sha256h
 	if err != nil {
 		return "", "", 0, err
 	}
-	dstAbs, err = fsutil.JoinWithinRoot(m.rootAbs, s.DestRel)
+	dstAbs, err = fsutil.ResolveWithinRoot(m.rootAbs, s.DestRel, m.followSymlinks)
 	if err != nil {
 		return "", "", 0, err
 	}
@@ -214,6 +216,23 @@ func (m *Manager) Finish(ctx context.Context, id string) (dstAbs string, sha256h
 	m.mu.Unlock()
 
 	return dstAbs, sha256hex, size, nil
+}
+
+func (m *Manager) Cancel(id string) error {
+	m.mu.Lock()
+	_, ok := m.sessions[id]
+	if ok {
+		delete(m.sessions, id)
+	}
+	m.mu.Unlock()
+	// Best-effort remove files.
+	_ = os.Remove(filepath.Join(m.dir, id+".json"))
+	_ = os.Remove(filepath.Join(m.dir, id+".part"))
+	_ = os.Remove(filepath.Join(m.dir, id+".tmp"))
+	if !ok {
+		return os.ErrNotExist
+	}
+	return nil
 }
 
 func (m *Manager) save(s *session) error {

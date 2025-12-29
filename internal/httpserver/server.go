@@ -2,6 +2,10 @@ package httpserver
 
 import (
 	"archive/zip"
+	"context"
+	"compress/gzip"
+	"crypto/rand"
+	"encoding/base64"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -18,9 +22,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/net/webdav"
+	"golang.org/x/crypto/bcrypt"
 
 	"lanparty/internal/auth"
 	"lanparty/internal/config"
@@ -30,42 +36,254 @@ import (
 )
 
 type Options struct {
-	Config config.Config
+	Config     config.Config
+	ConfigPath string
+}
+
+type ctxKey int
+
+const shareKey ctxKey = 1
+
+func shareFromContext(ctx context.Context) string {
+	v := ctx.Value(shareKey)
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
 }
 
 type Server struct {
-	cfg    config.Config
-	dedup  *dedup.Store
-	uploads *upload.Manager
+	cfg config.Config
+	cfgMu sync.RWMutex
+	cfgPath string
+
+	mu       sync.Mutex
+	dedup    map[string]*dedup.Store
+	uploads  map[string]*upload.Manager
+	davLocks map[string]webdav.LockSystem
+
+	thumbMu       sync.Mutex
+	thumbInflight map[string]*thumbCall
+	thumbSem      chan struct{}
 
 	webFS fs.FS
 }
 
-//go:embed web/index.html web/assets/* web/assets/fonts/*
+type thumbCall struct {
+	done chan struct{}
+	b    []byte
+	err  error
+}
+
+type gzipRW struct {
+	http.ResponseWriter
+	gw *gzip.Writer
+}
+
+func (g gzipRW) Write(p []byte) (int, error) {
+	return g.gw.Write(p)
+}
+
+func gzipIfAccepted(next http.Handler, should func(*http.Request) bool) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !should(r) || !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Vary", "Accept-Encoding")
+		w.Header().Del("Content-Length")
+		gw, _ := gzip.NewWriterLevel(w, gzip.BestSpeed)
+		defer gw.Close()
+		next.ServeHTTP(gzipRW{ResponseWriter: w, gw: gw}, r)
+	})
+}
+
+func parseBasicAuthHeader(v string) (user, pass string, ok bool) {
+	const prefix = "Basic "
+	if !strings.HasPrefix(v, prefix) {
+		return "", "", false
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(strings.TrimPrefix(v, prefix)))
+	if err != nil {
+		return "", "", false
+	}
+	s := string(raw)
+	i := strings.IndexByte(s, ':')
+	if i < 0 {
+		return "", "", false
+	}
+	u := s[:i]
+	p := s[i+1:]
+	if u == "" {
+		return "", "", false
+	}
+	if strings.Contains(u, "\x00") || strings.Contains(p, "\x00") {
+		return "", "", false
+	}
+	return u, p, true
+}
+
+// safeWebDAVFS enforces lanparty's path + symlink policy for WebDAV.
+// webdav.Dir only enforces lexical containment; it may follow symlinks to escape the root.
+type safeWebDAVFS struct {
+	cfg config.Config
+}
+
+func (s safeWebDAVFS) resolve(name string) (string, error) {
+	// webdav passes paths like "/foo/bar" (relative to the FS root).
+	rel := fsutil.CleanRelPath(strings.TrimPrefix(name, "/"))
+	return fsutil.ResolveWithinRoot(s.cfg.Root, rel, s.cfg.FollowSymlinks)
+}
+
+func (s safeWebDAVFS) Mkdir(ctx context.Context, name string, perm os.FileMode) error {
+	abs, err := s.resolve(name)
+	if err != nil {
+		return err
+	}
+	return os.Mkdir(abs, perm)
+}
+
+func (s safeWebDAVFS) OpenFile(ctx context.Context, name string, flag int, perm os.FileMode) (webdav.File, error) {
+	abs, err := s.resolve(name)
+	if err != nil {
+		return nil, err
+	}
+	return os.OpenFile(abs, flag, perm)
+}
+
+func (s safeWebDAVFS) RemoveAll(ctx context.Context, name string) error {
+	abs, err := s.resolve(name)
+	if err != nil {
+		return err
+	}
+	return os.RemoveAll(abs)
+}
+
+func (s safeWebDAVFS) Rename(ctx context.Context, oldName, newName string) error {
+	oldAbs, err := s.resolve(oldName)
+	if err != nil {
+		return err
+	}
+	newAbs, err := s.resolve(newName)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(newAbs), 0o755); err != nil {
+		return err
+	}
+	return os.Rename(oldAbs, newAbs)
+}
+
+func (s safeWebDAVFS) Stat(ctx context.Context, name string) (os.FileInfo, error) {
+	abs, err := s.resolve(name)
+	if err != nil {
+		return nil, err
+	}
+	return os.Stat(abs)
+}
+
+//go:embed web/index.html web/admin.html web/assets/* web/assets/fonts/*
 var embeddedWeb embed.FS
 
 func New(opts Options) (*Server, error) {
-	store, err := dedup.New(opts.Config.StateDir)
-	if err != nil {
-		return nil, err
-	}
-	up, err := upload.New(opts.Config.Root, opts.Config.StateDir, store)
-	if err != nil {
-		return nil, err
-	}
 	sub, err := fs.Sub(embeddedWeb, "web")
 	if err != nil {
 		return nil, err
 	}
 	return &Server{
-		cfg:     opts.Config,
-		dedup:   store,
-		uploads: up,
-		webFS:   sub,
+		cfg:      opts.Config,
+		cfgPath:  opts.ConfigPath,
+		dedup:    map[string]*dedup.Store{},
+		uploads:  map[string]*upload.Manager{},
+		davLocks: map[string]webdav.LockSystem{},
+		webFS:    sub,
 	}, nil
 }
 
+func (s *Server) cfgForReq(r *http.Request) config.Config {
+	s.cfgMu.RLock()
+	cfg := s.cfg
+	s.cfgMu.RUnlock()
+	name := shareFromContext(r.Context())
+	if name == "" {
+		return cfg
+	}
+	sh, ok := cfg.Shares[name]
+	if !ok {
+		return cfg
+	}
+	// share root/state
+	cfg.Root = sh.Root
+	if sh.StateDir != "" {
+		cfg.StateDir = sh.StateDir
+	} else if cfg.Root != "" {
+		cfg.StateDir = filepath.Join(cfg.Root, ".lanparty")
+	}
+	// share ACL override (optional)
+	if len(sh.ACLs) > 0 {
+		cfg.ACLs = sh.ACLs
+	}
+	if sh.FollowSymlinks != nil {
+		cfg.FollowSymlinks = *sh.FollowSymlinks
+	}
+	return cfg
+}
+
+func (s *Server) sharePrefix(r *http.Request) string {
+	if sh := shareFromContext(r.Context()); sh != "" {
+		return "/s/" + sh
+	}
+	return ""
+}
+
+func (s *Server) withSharePrefix(r *http.Request, p string) string {
+	return s.sharePrefix(r) + p
+}
+
+func (s *Server) shareDeps(r *http.Request) (*dedup.Store, *upload.Manager, error) {
+	cfg := s.cfgForReq(r)
+	name := shareFromContext(r.Context())
+	// default share uses empty name key
+	key := name
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if st, ok := s.dedup[key]; ok {
+		if up, ok2 := s.uploads[key]; ok2 {
+			return st, up, nil
+		}
+	}
+
+	store, err := dedup.New(cfg.StateDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	up, err := upload.New(cfg.Root, cfg.StateDir, store, cfg.FollowSymlinks)
+	if err != nil {
+		return nil, nil, err
+	}
+	s.dedup[key] = store
+	s.uploads[key] = up
+	return store, up, nil
+}
+
+func (s *Server) davLockForReq(r *http.Request) webdav.LockSystem {
+	name := shareFromContext(r.Context())
+	key := name
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ls, ok := s.davLocks[key]; ok {
+		return ls
+	}
+	ls := webdav.NewMemLS()
+	s.davLocks[key] = ls
+	return ls
+}
+
 func (s *Server) Handler() http.Handler {
+	inner := http.NewServeMux()
 	mux := http.NewServeMux()
 
 	// health
@@ -75,7 +293,7 @@ func (s *Server) Handler() http.Handler {
 	})
 
 	// Login helper for browsers (triggers BasicAuth prompt).
-	mux.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
+	inner.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
 		if !auth.HasAuth(s.cfg) {
 			http.Redirect(w, r, "/", http.StatusFound)
 			return
@@ -88,12 +306,13 @@ func (s *Server) Handler() http.Handler {
 	})
 
 	// WebDAV
-	dav := &webdav.Handler{
-		Prefix:     "/dav",
-		FileSystem: webdav.Dir(s.cfg.Root),
-		LockSystem: webdav.NewMemLS(),
-	}
-	mux.Handle("/dav/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	inner.Handle("/dav/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cfg := s.cfgForReq(r)
+		dav := &webdav.Handler{
+			Prefix:     "/dav",
+			FileSystem: safeWebDAVFS{cfg: cfg},
+			LockSystem: s.davLockForReq(r),
+		}
 		// Path-aware ACL enforcement for WebDAV.
 		clean := s.davPathToClean(r.URL.Path)
 		if ok, err := s.allowed(r, auth.PermRead, clean); err != nil || !ok {
@@ -122,7 +341,16 @@ func (s *Server) Handler() http.Handler {
 
 	// static assets
 	assets, _ := fs.Sub(s.webFS, "assets")
-	mux.Handle("/assets/", http.StripPrefix("/assets/", http.FileServer(http.FS(assets))))
+	assetFS := http.StripPrefix("/assets/", http.FileServer(http.FS(assets)))
+	mux.Handle("/assets/", gzipIfAccepted(assetFS, func(r *http.Request) bool {
+		ext := strings.ToLower(filepath.Ext(r.URL.Path))
+		switch ext {
+		case ".js", ".css", ".html", ".svg", ".json", ".txt", ".map":
+			return true
+		default:
+			return false
+		}
+	}))
 
 	// favicon (serve a small svg; avoids embedding a binary .ico)
 	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
@@ -145,8 +373,8 @@ func (s *Server) Handler() http.Handler {
 </svg>`)
 	})
 
-	// UI index
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	// UI index (served for "/" within a share context too)
+	inner.Handle("/", gzipIfAccepted(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
 			return
@@ -158,30 +386,93 @@ func (s *Server) Handler() http.Handler {
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(b)
-	})
+	}), func(r *http.Request) bool {
+		return r.URL.Path == "/"
+	}))
+
+	// Admin page
+	inner.Handle("/admin", gzipIfAccepted(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/admin" {
+			http.NotFound(w, r)
+			return
+		}
+		b, err := fs.ReadFile(s.webFS, "admin.html")
+		if err != nil {
+			http.Error(w, "missing admin ui", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(b)
+	}), func(r *http.Request) bool { return r.URL.Path == "/admin" }))
 
 	// file serving with Range
-	mux.Handle("/f/", s.require(auth.PermRead, http.HandlerFunc(s.handleFile)))
+	inner.Handle("/f/", s.require(auth.PermRead, http.HandlerFunc(s.handleFile)))
 
 	// thumbnails
-	mux.Handle("/thumb", s.require(auth.PermRead, http.HandlerFunc(s.handleThumb)))
+	inner.Handle("/thumb", s.require(auth.PermRead, http.HandlerFunc(s.handleThumb)))
 
 	// api
-	mux.Handle("/api/list", s.require(auth.PermRead, http.HandlerFunc(s.handleList)))
-	mux.Handle("/api/search", s.require(auth.PermRead, http.HandlerFunc(s.handleSearch)))
-	mux.Handle("/api/mkdir", http.HandlerFunc(s.handleMkdir))
-	mux.Handle("/api/rename", http.HandlerFunc(s.handleRename))
-	mux.Handle("/api/delete", http.HandlerFunc(s.handleDelete))
-	mux.Handle("/api/upload", s.require(auth.PermWrite, http.HandlerFunc(s.handleMultipartUpload)))
+	inner.Handle("/api/list", s.require(auth.PermRead, http.HandlerFunc(s.handleList)))
+	inner.Handle("/api/search", s.require(auth.PermRead, http.HandlerFunc(s.handleSearch)))
+	inner.Handle("/api/mkdir", http.HandlerFunc(s.handleMkdir))
+	inner.Handle("/api/rename", http.HandlerFunc(s.handleRename))
+	inner.Handle("/api/delete", http.HandlerFunc(s.handleDelete))
+	inner.Handle("/api/copy", http.HandlerFunc(s.handleCopy))
+	inner.Handle("/api/move", http.HandlerFunc(s.handleMove))
+	inner.Handle("/api/write", http.HandlerFunc(s.handleWrite))
+	inner.Handle("/api/admin/bcrypt", http.HandlerFunc(s.handleAdminBcrypt))
+	inner.Handle("/api/admin/state", http.HandlerFunc(s.handleAdminState))
+	inner.Handle("/api/admin/users", http.HandlerFunc(s.handleAdminUsers))
+	inner.Handle("/api/admin/tokens", http.HandlerFunc(s.handleAdminTokens))
+	inner.Handle("/api/upload", s.require(auth.PermWrite, http.HandlerFunc(s.handleMultipartUpload)))
 
 	// resumable uploads
-	mux.Handle("/api/uploads", s.require(auth.PermWrite, http.HandlerFunc(s.handleUploads)))
-	mux.Handle("/api/uploads/", http.HandlerFunc(s.handleUploadID))
+	inner.Handle("/api/uploads", s.require(auth.PermWrite, http.HandlerFunc(s.handleUploads)))
+	inner.Handle("/api/uploads/", http.HandlerFunc(s.handleUploadID))
 
 	// zip (read) - supports multi-select downloads via POST
-	mux.Handle("/api/zip", http.HandlerFunc(s.handleZip))
+	inner.Handle("/api/zip", http.HandlerFunc(s.handleZip))
+	inner.Handle("/api/zipls", s.require(auth.PermRead, http.HandlerFunc(s.handleZipList)))
+	inner.Handle("/api/zipget", s.require(auth.PermRead, http.HandlerFunc(s.handleZipGet)))
 
-	return auth.RequireAuth(s.cfg, mux)
+	// Share dispatcher: supports / (default) and /s/<share>/...
+	mux.Handle("/", s.dispatch(s.authWrap(inner)))
+
+	return mux
+}
+
+func (s *Server) dispatch(inner http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path
+		if strings.HasPrefix(p, "/s/") {
+			rest := strings.TrimPrefix(p, "/s/")
+			i := strings.Index(rest, "/")
+			if i < 0 {
+				// /s/<share> -> redirect to /s/<share>/
+				if rest != "" {
+					http.Redirect(w, r, "/s/"+rest+"/", http.StatusFound)
+					return
+				}
+				http.NotFound(w, r)
+				return
+			}
+			share := rest[:i]
+			if share == "" {
+				http.NotFound(w, r)
+				return
+			}
+			if _, ok := s.cfg.Shares[share]; !ok {
+				http.NotFound(w, r)
+				return
+			}
+			// Strip /s/<share> prefix.
+			r2 := r.Clone(context.WithValue(r.Context(), shareKey, share))
+			r2.URL.Path = rest[i:] // includes leading "/"
+			inner.ServeHTTP(w, r2)
+			return
+		}
+		inner.ServeHTTP(w, r.Clone(context.WithValue(r.Context(), shareKey, "")))
+	})
 }
 
 func (s *Server) require(perm auth.Perm, next http.Handler) http.Handler {
@@ -211,16 +502,66 @@ func (s *Server) require(perm auth.Perm, next http.Handler) http.Handler {
 
 func (s *Server) allowed(r *http.Request, perm auth.Perm, cleanPath string) (bool, error) {
 	user := auth.UserFromContext(r.Context())
-	return auth.Allowed(s.cfg, user, cleanPath, perm)
+	cfg := s.cfgForReq(r)
+	return auth.Allowed(cfg, user, cleanPath, perm)
 }
 
 func (s *Server) shouldChallenge(r *http.Request) bool {
-	return auth.HasAuth(s.cfg) && s.cfg.AuthOptional && auth.UserFromContext(r.Context()) == ""
+	cfg := s.cfgForReq(r)
+	return (len(cfg.Users) > 0 || len(cfg.Tokens) > 0) && cfg.AuthOptional && auth.UserFromContext(r.Context()) == ""
 }
 
 func (s *Server) authChallenge(w http.ResponseWriter) {
 	w.Header().Set("WWW-Authenticate", `Basic realm="lanparty"`)
 	http.Error(w, "unauthorized", http.StatusUnauthorized)
+}
+
+func (s *Server) authWrap(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cfg := s.cfgForReq(r)
+		if len(cfg.Users) == 0 && len(cfg.Tokens) == 0 {
+			next.ServeHTTP(w, r)
+			return
+		}
+		authz := r.Header.Get("Authorization")
+		if cfg.AuthOptional && strings.TrimSpace(authz) == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Bearer token
+		if strings.HasPrefix(authz, "Bearer ") {
+			tok := strings.TrimSpace(strings.TrimPrefix(authz, "Bearer "))
+			if tok == "" {
+				s.authChallenge(w)
+				return
+			}
+			user := cfg.Tokens[tok]
+			if user == "" {
+				s.authChallenge(w)
+				return
+			}
+			r = r.WithContext(auth.WithUser(r.Context(), user))
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Basic
+		u, p, ok := parseBasicAuthHeader(authz)
+		if !ok {
+			s.authChallenge(w)
+			return
+		}
+		user, ok := cfg.Users[u]
+		if !ok {
+			s.authChallenge(w)
+			return
+		}
+		if err := bcrypt.CompareHashAndPassword([]byte(user.Bcrypt), []byte(p)); err != nil {
+			s.authChallenge(w)
+			return
+		}
+		r = r.WithContext(auth.WithUser(r.Context(), u))
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) davPathToClean(urlPath string) string {
@@ -240,7 +581,8 @@ func (s *Server) davPathToClean(urlPath string) string {
 
 func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 	rel := fsutil.CleanRelPath(strings.TrimPrefix(r.URL.Path, "/f/"))
-	abs, err := fsutil.JoinWithinRoot(s.cfg.Root, rel)
+	cfg := s.cfgForReq(r)
+	abs, err := fsutil.ResolveWithinRoot(cfg.Root, rel, cfg.FollowSymlinks)
 	if err != nil {
 		http.Error(w, "bad path", http.StatusBadRequest)
 		return
@@ -276,6 +618,8 @@ type listItem struct {
 	Name  string `json:"name"`
 	Path  string `json:"path"` // rel
 	IsDir bool   `json:"isDir"`
+	IsLink bool  `json:"isLink,omitempty"`
+	LinkTo string `json:"linkTo,omitempty"`
 	Size  int64  `json:"size"`
 	Mtime int64  `json:"mtime"`
 	Mime  string `json:"mime,omitempty"`
@@ -291,7 +635,8 @@ type readmeInfo struct {
 
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	rel := fsutil.CleanRelPath(r.URL.Query().Get("path"))
-	abs, err := fsutil.JoinWithinRoot(s.cfg.Root, rel)
+	cfg := s.cfgForReq(r)
+	abs, err := fsutil.ResolveWithinRoot(cfg.Root, rel, cfg.FollowSymlinks)
 	if err != nil {
 		http.Error(w, "bad path", http.StatusBadRequest)
 		return
@@ -327,23 +672,32 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	items := make([]listItem, 0, len(ents))
 	for _, e := range ents {
 		info, err := e.Info()
-		if err != nil {
-			continue
-		}
 		name := e.Name()
 		childRel := joinRel(rel, name)
+		childAbs := filepath.Join(abs, name)
+		isLink := (e.Type() & os.ModeSymlink) != 0
 		it := listItem{
 			Name:  name,
 			Path:  childRel,
 			IsDir: e.IsDir(),
-			Size:  info.Size(),
-			Mtime: info.ModTime().Unix(),
+			IsLink: isLink,
+		}
+		if info != nil && err == nil {
+			it.Size = info.Size()
+			it.Mtime = info.ModTime().Unix()
+		}
+		if isLink {
+			if lt, err := os.Readlink(childAbs); err == nil {
+				it.LinkTo = lt
+			}
 		}
 		if !it.IsDir {
 			ext := strings.ToLower(filepath.Ext(name))
 			it.Mime = contentTypeForName(name)
 			if isImageExt(ext) {
-				it.Thumb = "/thumb?path=" + urlQueryEscape(childRel)
+				it.Thumb = s.withSharePrefix(r, "/thumb?path="+urlQueryEscape(childRel))
+			} else if isTextExt(ext) && it.Size > 0 && it.Size <= 1024*1024 {
+				it.Thumb = s.withSharePrefix(r, "/thumb?path="+urlQueryEscape(childRel)+"&t=txt")
 			}
 		}
 		items = append(items, it)
@@ -368,7 +722,8 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"items": []listItem{}, "seen": 0, "truncated": false})
 		return
 	}
-	baseAbs, err := fsutil.JoinWithinRoot(s.cfg.Root, baseRel)
+	cfg := s.cfgForReq(r)
+	baseAbs, err := fsutil.ResolveWithinRoot(cfg.Root, baseRel, cfg.FollowSymlinks)
 	if err != nil {
 		http.Error(w, "bad path", http.StatusBadRequest)
 		return
@@ -424,7 +779,9 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			ext := strings.ToLower(filepath.Ext(name))
 			it.Mime = contentTypeForName(name)
 			if isImageExt(ext) {
-				it.Thumb = "/thumb?path=" + urlQueryEscape(rel)
+				it.Thumb = s.withSharePrefix(r, "/thumb?path="+urlQueryEscape(rel))
+			} else if isTextExt(ext) && it.Size > 0 && it.Size <= 1024*1024 {
+				it.Thumb = s.withSharePrefix(r, "/thumb?path="+urlQueryEscape(rel)+"&t=txt")
 			}
 		}
 		hits = append(hits, it)
@@ -545,7 +902,8 @@ func (s *Server) handleMkdir(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	abs, err := fsutil.JoinWithinRoot(s.cfg.Root, rel)
+	cfg := s.cfgForReq(r)
+	abs, err := fsutil.ResolveWithinRoot(cfg.Root, rel, cfg.FollowSymlinks)
 	if err != nil {
 		http.Error(w, "bad path", http.StatusBadRequest)
 		return
@@ -588,12 +946,13 @@ func (s *Server) handleRename(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	fromAbs, err := fsutil.JoinWithinRoot(s.cfg.Root, fromRel)
+	cfg := s.cfgForReq(r)
+	fromAbs, err := fsutil.ResolveWithinRoot(cfg.Root, fromRel, cfg.FollowSymlinks)
 	if err != nil {
 		http.Error(w, "bad from", http.StatusBadRequest)
 		return
 	}
-	toAbs, err := fsutil.JoinWithinRoot(s.cfg.Root, toRel)
+	toAbs, err := fsutil.ResolveWithinRoot(cfg.Root, toRel, cfg.FollowSymlinks)
 	if err != nil {
 		http.Error(w, "bad to", http.StatusBadRequest)
 		return
@@ -630,7 +989,8 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	abs, err := fsutil.JoinWithinRoot(s.cfg.Root, rel)
+	cfg := s.cfgForReq(r)
+	abs, err := fsutil.ResolveWithinRoot(cfg.Root, rel, cfg.FollowSymlinks)
 	if err != nil {
 		http.Error(w, "bad path", http.StatusBadRequest)
 		return
@@ -642,9 +1002,703 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true})
 }
 
+func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Path    string `json:"path"`
+		Content string `json:"content"`
+		Mode    string `json:"mode,omitempty"` // overwrite|rename|skip|error
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	rel := fsutil.CleanRelPath(req.Path)
+	if rel == "" {
+		http.Error(w, "missing path", http.StatusBadRequest)
+		return
+	}
+	mode := strings.ToLower(strings.TrimSpace(req.Mode))
+	if mode == "" {
+		mode = "overwrite"
+	}
+	if mode != "overwrite" && mode != "rename" && mode != "skip" && mode != "error" {
+		http.Error(w, "bad mode", http.StatusBadRequest)
+		return
+	}
+	if len(req.Content) > 2*1024*1024 {
+		http.Error(w, "too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	if ok, err := s.allowed(r, auth.PermWrite, "/"+rel); err != nil || !ok {
+		if s.shouldChallenge(r) {
+			s.authChallenge(w)
+		} else {
+			http.Error(w, "forbidden", http.StatusForbidden)
+		}
+		return
+	}
+	cfg := s.cfgForReq(r)
+	abs, err := fsutil.ResolveWithinRoot(cfg.Root, rel, cfg.FollowSymlinks)
+	if err != nil {
+		http.Error(w, "bad path", http.StatusBadRequest)
+		return
+	}
+	if st, err := os.Stat(abs); err == nil {
+		if st.IsDir() {
+			http.Error(w, "is a directory", http.StatusBadRequest)
+			return
+		}
+		switch mode {
+		case "skip":
+			writeJSON(w, map[string]any{"ok": true, "skipped": true, "path": rel})
+			return
+		case "error":
+			http.Error(w, "destination exists", http.StatusConflict)
+			return
+		case "rename":
+			parentRel := path.Dir("/" + rel)
+			parentRel = strings.TrimPrefix(parentRel, "/")
+			parentAbs, err := fsutil.ResolveWithinRoot(cfg.Root, parentRel, cfg.FollowSymlinks)
+			if err != nil {
+				http.Error(w, "bad path", http.StatusBadRequest)
+				return
+			}
+			nm, err := uniqueNameInDir(parentAbs, filepath.Base(rel))
+			if err != nil {
+				http.Error(w, "write failed", http.StatusInternalServerError)
+				return
+			}
+			rel = joinRel(parentRel, nm)
+			abs, err = fsutil.ResolveWithinRoot(cfg.Root, rel, cfg.FollowSymlinks)
+			if err != nil {
+				http.Error(w, "bad path", http.StatusBadRequest)
+				return
+			}
+		case "overwrite":
+			// ok
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		http.Error(w, "mkdir failed", http.StatusInternalServerError)
+		return
+	}
+	tmp := abs + fmt.Sprintf(".tmp-%d", time.Now().UnixNano())
+	if err := os.WriteFile(tmp, []byte(req.Content), 0o644); err != nil {
+		http.Error(w, "write failed", http.StatusInternalServerError)
+		return
+	}
+	if err := os.Rename(tmp, abs); err != nil {
+		_ = os.Remove(tmp)
+		http.Error(w, "write failed", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "path": rel})
+}
+
+func (s *Server) handleAdminBcrypt(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	// Admin-only. (In no-auth mode, everyone is admin.)
+	if ok, err := s.allowed(r, auth.PermAdmin, "/"); err != nil || !ok {
+		if s.shouldChallenge(r) {
+			s.authChallenge(w)
+		} else {
+			http.Error(w, "forbidden", http.StatusForbidden)
+		}
+		return
+	}
+	var req struct {
+		Password string `json:"password"`
+		Cost     int    `json:"cost,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	if req.Password == "" {
+		http.Error(w, "missing password", http.StatusBadRequest)
+		return
+	}
+	cost := req.Cost
+	if cost == 0 {
+		cost = bcrypt.DefaultCost
+	}
+	if cost < bcrypt.MinCost || cost > bcrypt.MaxCost {
+		http.Error(w, "bad cost", http.StatusBadRequest)
+		return
+	}
+	h, err := bcrypt.GenerateFromPassword([]byte(req.Password), cost)
+	if err != nil {
+		http.Error(w, "bcrypt failed", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"bcrypt": string(h)})
+}
+
+func (s *Server) adminOnly(w http.ResponseWriter, r *http.Request) bool {
+	if ok, err := s.allowed(r, auth.PermAdmin, "/"); err != nil || !ok {
+		if s.shouldChallenge(r) {
+			s.authChallenge(w)
+		} else {
+			http.Error(w, "forbidden", http.StatusForbidden)
+		}
+		return false
+	}
+	return true
+}
+
+func (s *Server) persistConfig(cfg config.Config) error {
+	s.cfgMu.RLock()
+	path := s.cfgPath
+	s.cfgMu.RUnlock()
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	b, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + fmt.Sprintf(".tmp-%d", time.Now().UnixNano())
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+func (s *Server) handleAdminState(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.adminOnly(w, r) {
+		return
+	}
+	cfg := s.cfgForReq(r)
+	type tok struct {
+		TokenPrefix string `json:"tokenPrefix"`
+		User        string `json:"user"`
+	}
+	users := make([]string, 0, len(cfg.Users))
+	for u := range cfg.Users {
+		users = append(users, u)
+	}
+	sort.Strings(users)
+	toks := make([]tok, 0, len(cfg.Tokens))
+	for t, u := range cfg.Tokens {
+		p := t
+		if len(p) > 8 {
+			p = p[:8]
+		}
+		toks = append(toks, tok{TokenPrefix: p, User: u})
+	}
+	sort.Slice(toks, func(i, j int) bool {
+		if toks[i].User != toks[j].User {
+			return toks[i].User < toks[j].User
+		}
+		return toks[i].TokenPrefix < toks[j].TokenPrefix
+	})
+	writeJSON(w, map[string]any{
+		"users":      users,
+		"tokens":     toks,
+		"persisted":  strings.TrimSpace(s.cfgPath) != "",
+		"configPath": s.cfgPath,
+	})
+}
+
+func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOnly(w, r) {
+		return
+	}
+	switch r.Method {
+	case http.MethodPost:
+		var req struct {
+			Username string `json:"username"`
+			Password string `json:"password"`
+			Cost     int    `json:"cost,omitempty"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad json", http.StatusBadRequest)
+			return
+		}
+		u := strings.TrimSpace(req.Username)
+		if u == "" || strings.Contains(u, "\x00") || strings.Contains(u, ":") {
+			http.Error(w, "bad username", http.StatusBadRequest)
+			return
+		}
+		if req.Password == "" {
+			http.Error(w, "missing password", http.StatusBadRequest)
+			return
+		}
+		cost := req.Cost
+		if cost == 0 {
+			cost = bcrypt.DefaultCost
+		}
+		if cost < bcrypt.MinCost || cost > bcrypt.MaxCost {
+			http.Error(w, "bad cost", http.StatusBadRequest)
+			return
+		}
+		h, err := bcrypt.GenerateFromPassword([]byte(req.Password), cost)
+		if err != nil {
+			http.Error(w, "bcrypt failed", http.StatusInternalServerError)
+			return
+		}
+		s.cfgMu.Lock()
+		cfg := s.cfg
+		if cfg.Users == nil {
+			cfg.Users = map[string]config.User{}
+		}
+		cfg.Users[u] = config.User{Bcrypt: string(h)}
+		s.cfg = cfg
+		s.cfgMu.Unlock()
+		_ = s.persistConfig(cfg)
+		writeJSON(w, map[string]any{"ok": true, "username": u, "bcrypt": string(h), "persisted": strings.TrimSpace(s.cfgPath) != ""})
+	case http.MethodDelete:
+		var req struct {
+			Username string `json:"username"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad json", http.StatusBadRequest)
+			return
+		}
+		u := strings.TrimSpace(req.Username)
+		s.cfgMu.Lock()
+		cfg := s.cfg
+		if cfg.Users != nil {
+			delete(cfg.Users, u)
+		}
+		// also revoke any tokens for this user
+		if cfg.Tokens != nil {
+			for t, tu := range cfg.Tokens {
+				if tu == u {
+					delete(cfg.Tokens, t)
+				}
+			}
+		}
+		s.cfg = cfg
+		s.cfgMu.Unlock()
+		_ = s.persistConfig(cfg)
+		writeJSON(w, map[string]any{"ok": true, "persisted": strings.TrimSpace(s.cfgPath) != ""})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleAdminTokens(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOnly(w, r) {
+		return
+	}
+	switch r.Method {
+	case http.MethodPost:
+		var req struct {
+			Username string `json:"username"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad json", http.StatusBadRequest)
+			return
+		}
+		u := strings.TrimSpace(req.Username)
+		if u == "" {
+			http.Error(w, "missing username", http.StatusBadRequest)
+			return
+		}
+		// Require that the user exists (so ACL logic makes sense).
+		cfg := s.cfgForReq(r)
+		if _, ok := cfg.Users[u]; !ok {
+			http.Error(w, "unknown user", http.StatusBadRequest)
+			return
+		}
+		// generate token
+		var b [24]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			http.Error(w, "token failed", http.StatusInternalServerError)
+			return
+		}
+		tok := base64.RawURLEncoding.EncodeToString(b[:])
+
+		s.cfgMu.Lock()
+		cfg = s.cfg
+		if cfg.Tokens == nil {
+			cfg.Tokens = map[string]string{}
+		}
+		cfg.Tokens[tok] = u
+		s.cfg = cfg
+		s.cfgMu.Unlock()
+		_ = s.persistConfig(cfg)
+		writeJSON(w, map[string]any{"ok": true, "token": tok, "username": u, "persisted": strings.TrimSpace(s.cfgPath) != ""})
+	case http.MethodDelete:
+		var req struct {
+			Token string `json:"token"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad json", http.StatusBadRequest)
+			return
+		}
+		tok := strings.TrimSpace(req.Token)
+		if tok == "" {
+			http.Error(w, "missing token", http.StatusBadRequest)
+			return
+		}
+		s.cfgMu.Lock()
+		cfg := s.cfg
+		if cfg.Tokens != nil {
+			delete(cfg.Tokens, tok)
+		}
+		s.cfg = cfg
+		s.cfgMu.Unlock()
+		_ = s.persistConfig(cfg)
+		writeJSON(w, map[string]any{"ok": true, "persisted": strings.TrimSpace(s.cfgPath) != ""})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleCopy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Paths     []string `json:"paths"`
+		DestDir   string   `json:"destDir"`
+		Mode      string   `json:"mode,omitempty"` // error|skip|overwrite|rename
+		Overwrite bool     `json:"overwrite,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	if len(req.Paths) == 0 {
+		http.Error(w, "missing paths", http.StatusBadRequest)
+		return
+	}
+	mode := strings.ToLower(strings.TrimSpace(req.Mode))
+	if mode == "" {
+		if req.Overwrite {
+			mode = "overwrite"
+		} else {
+			mode = "error"
+		}
+	}
+	if mode != "error" && mode != "skip" && mode != "overwrite" && mode != "rename" {
+		http.Error(w, "bad mode", http.StatusBadRequest)
+		return
+	}
+	destDirRel := fsutil.CleanRelPath(req.DestDir)
+	cfg := s.cfgForReq(r)
+	destDirAbs, err := fsutil.ResolveWithinRoot(cfg.Root, destDirRel, cfg.FollowSymlinks)
+	if err != nil {
+		http.Error(w, "bad dest", http.StatusBadRequest)
+		return
+	}
+	if st, err := os.Stat(destDirAbs); err != nil || !st.IsDir() {
+		http.Error(w, "dest is not a directory", http.StatusBadRequest)
+		return
+	}
+	// Require write permission on destination dir.
+	if ok, err := s.allowed(r, auth.PermWrite, "/"+destDirRel); err != nil || !ok {
+		if s.shouldChallenge(r) {
+			s.authChallenge(w)
+		} else {
+			http.Error(w, "forbidden", http.StatusForbidden)
+		}
+		return
+	}
+
+	type outItem struct {
+		From   string `json:"from"`
+		To     string `json:"to"`
+		Status string `json:"status"` // ok|skipped|renamed|overwritten
+	}
+	out := make([]outItem, 0, len(req.Paths))
+	for _, p := range req.Paths {
+		srcRel := fsutil.CleanRelPath(p)
+		if srcRel == "" {
+			continue
+		}
+		// Require read permission on source.
+		if ok, err := s.allowed(r, auth.PermRead, "/"+srcRel); err != nil || !ok {
+			if s.shouldChallenge(r) {
+				s.authChallenge(w)
+			} else {
+				http.Error(w, "forbidden", http.StatusForbidden)
+			}
+			return
+		}
+
+		srcAbs, err := fsutil.ResolveWithinRoot(cfg.Root, srcRel, cfg.FollowSymlinks)
+		if err != nil {
+			http.Error(w, "bad path", http.StatusBadRequest)
+			return
+		}
+		st, err := os.Stat(srcAbs)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		base := filepath.Base(srcRel)
+		if base == "" || base == "." || base == "/" {
+			http.Error(w, "bad name", http.StatusBadRequest)
+			return
+		}
+		dstName := base
+		dstRel := joinRel(destDirRel, dstName)
+		dstAbs, err := fsutil.ResolveWithinRoot(cfg.Root, dstRel, cfg.FollowSymlinks)
+		if err != nil {
+			http.Error(w, "bad dest", http.StatusBadRequest)
+			return
+		}
+		// Require write permission on destination path.
+		if ok, err := s.allowed(r, auth.PermWrite, "/"+dstRel); err != nil || !ok {
+			if s.shouldChallenge(r) {
+				s.authChallenge(w)
+			} else {
+				http.Error(w, "forbidden", http.StatusForbidden)
+			}
+			return
+		}
+
+		dstExists := false
+		if _, err := os.Stat(dstAbs); err == nil {
+			dstExists = true
+		}
+		status := "ok"
+		if dstExists {
+			switch mode {
+			case "skip":
+				out = append(out, outItem{From: srcRel, To: dstRel, Status: "skipped"})
+				continue
+			case "error":
+				http.Error(w, "destination exists", http.StatusConflict)
+				return
+			case "rename":
+				nm, err := uniqueNameInDir(destDirAbs, dstName)
+				if err != nil {
+					http.Error(w, "copy failed", http.StatusInternalServerError)
+					return
+				}
+				dstName = nm
+				dstRel = joinRel(destDirRel, dstName)
+				dstAbs, err = fsutil.ResolveWithinRoot(cfg.Root, dstRel, cfg.FollowSymlinks)
+				if err != nil {
+					http.Error(w, "bad dest", http.StatusBadRequest)
+					return
+				}
+				status = "renamed"
+			case "overwrite":
+				status = "overwritten"
+			}
+		}
+
+		if st.IsDir() {
+			if err := copyDirNoSymlinks(srcAbs, dstAbs, mode == "overwrite"); err != nil {
+				http.Error(w, "copy failed", http.StatusInternalServerError)
+				return
+			}
+		} else {
+			if err := copyFileAtomic(srcAbs, dstAbs, mode == "overwrite"); err != nil {
+				if errors.Is(err, os.ErrExist) {
+					http.Error(w, "destination exists", http.StatusConflict)
+					return
+				}
+				http.Error(w, "copy failed", http.StatusInternalServerError)
+				return
+			}
+		}
+		out = append(out, outItem{From: srcRel, To: dstRel, Status: status})
+	}
+	writeJSON(w, map[string]any{"ok": true, "items": out})
+}
+
+func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Paths     []string `json:"paths"`
+		DestDir   string   `json:"destDir"`
+		Mode      string   `json:"mode,omitempty"` // error|skip|overwrite|rename
+		Overwrite bool     `json:"overwrite,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	if len(req.Paths) == 0 {
+		http.Error(w, "missing paths", http.StatusBadRequest)
+		return
+	}
+	mode := strings.ToLower(strings.TrimSpace(req.Mode))
+	if mode == "" {
+		if req.Overwrite {
+			mode = "overwrite"
+		} else {
+			mode = "error"
+		}
+	}
+	if mode != "error" && mode != "skip" && mode != "overwrite" && mode != "rename" {
+		http.Error(w, "bad mode", http.StatusBadRequest)
+		return
+	}
+	destDirRel := fsutil.CleanRelPath(req.DestDir)
+	cfg := s.cfgForReq(r)
+	destDirAbs, err := fsutil.ResolveWithinRoot(cfg.Root, destDirRel, cfg.FollowSymlinks)
+	if err != nil {
+		http.Error(w, "bad dest", http.StatusBadRequest)
+		return
+	}
+	if st, err := os.Stat(destDirAbs); err != nil || !st.IsDir() {
+		http.Error(w, "dest is not a directory", http.StatusBadRequest)
+		return
+	}
+	// Require write permission on destination dir.
+	if ok, err := s.allowed(r, auth.PermWrite, "/"+destDirRel); err != nil || !ok {
+		if s.shouldChallenge(r) {
+			s.authChallenge(w)
+		} else {
+			http.Error(w, "forbidden", http.StatusForbidden)
+		}
+		return
+	}
+
+	type outItem struct {
+		From   string `json:"from"`
+		To     string `json:"to"`
+		Status string `json:"status"` // ok|skipped|renamed|overwritten
+	}
+	out := make([]outItem, 0, len(req.Paths))
+	for _, p := range req.Paths {
+		srcRel := fsutil.CleanRelPath(p)
+		if srcRel == "" {
+			continue
+		}
+		// moving implies write on source and dest
+		if ok, err := s.allowed(r, auth.PermWrite, "/"+srcRel); err != nil || !ok {
+			if s.shouldChallenge(r) {
+				s.authChallenge(w)
+			} else {
+				http.Error(w, "forbidden", http.StatusForbidden)
+			}
+			return
+		}
+		srcAbs, err := fsutil.ResolveWithinRoot(cfg.Root, srcRel, cfg.FollowSymlinks)
+		if err != nil {
+			http.Error(w, "bad path", http.StatusBadRequest)
+			return
+		}
+		if _, err := os.Stat(srcAbs); err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		base := filepath.Base(srcRel)
+		if base == "" || base == "." || base == "/" {
+			http.Error(w, "bad name", http.StatusBadRequest)
+			return
+		}
+		dstName := base
+		dstRel := joinRel(destDirRel, dstName)
+		dstAbs, err := fsutil.ResolveWithinRoot(cfg.Root, dstRel, cfg.FollowSymlinks)
+		if err != nil {
+			http.Error(w, "bad dest", http.StatusBadRequest)
+			return
+		}
+		if ok, err := s.allowed(r, auth.PermWrite, "/"+dstRel); err != nil || !ok {
+			if s.shouldChallenge(r) {
+				s.authChallenge(w)
+			} else {
+				http.Error(w, "forbidden", http.StatusForbidden)
+			}
+			return
+		}
+		dstExists := false
+		if _, err := os.Stat(dstAbs); err == nil {
+			dstExists = true
+		}
+		status := "ok"
+		if dstExists {
+			switch mode {
+			case "skip":
+				out = append(out, outItem{From: srcRel, To: dstRel, Status: "skipped"})
+				continue
+			case "error":
+				http.Error(w, "destination exists", http.StatusConflict)
+				return
+			case "rename":
+				nm, err := uniqueNameInDir(destDirAbs, dstName)
+				if err != nil {
+					http.Error(w, "move failed", http.StatusInternalServerError)
+					return
+				}
+				dstName = nm
+				dstRel = joinRel(destDirRel, dstName)
+				dstAbs, err = fsutil.ResolveWithinRoot(cfg.Root, dstRel, cfg.FollowSymlinks)
+				if err != nil {
+					http.Error(w, "bad dest", http.StatusBadRequest)
+					return
+				}
+				status = "renamed"
+			case "overwrite":
+				status = "overwritten"
+				_ = os.RemoveAll(dstAbs)
+			}
+		}
+
+		// Try rename first.
+		if err := os.MkdirAll(filepath.Dir(dstAbs), 0o755); err != nil {
+			http.Error(w, "mkdir failed", http.StatusInternalServerError)
+			return
+		}
+		if err := os.Rename(srcAbs, dstAbs); err != nil {
+			// cross-device or other rename issues: copy+delete
+			st, serr := os.Stat(srcAbs)
+			if serr != nil {
+				http.Error(w, "move failed", http.StatusInternalServerError)
+				return
+			}
+			if st.IsDir() {
+				if err := copyDirNoSymlinks(srcAbs, dstAbs, req.Overwrite); err != nil {
+					http.Error(w, "move failed", http.StatusInternalServerError)
+					return
+				}
+				if err := os.RemoveAll(srcAbs); err != nil {
+					http.Error(w, "move failed", http.StatusInternalServerError)
+					return
+				}
+			} else {
+				if err := copyFileAtomic(srcAbs, dstAbs, req.Overwrite); err != nil {
+					if errors.Is(err, os.ErrExist) {
+						http.Error(w, "destination exists", http.StatusConflict)
+						return
+					}
+					http.Error(w, "move failed", http.StatusInternalServerError)
+					return
+				}
+				_ = os.Remove(srcAbs)
+			}
+		}
+		out = append(out, outItem{From: srcRel, To: dstRel, Status: status})
+	}
+	writeJSON(w, map[string]any{"ok": true, "items": out})
+}
+
 func (s *Server) handleMultipartUpload(w http.ResponseWriter, r *http.Request) {
 	rel := fsutil.CleanRelPath(r.URL.Query().Get("path"))
-	absDir, err := fsutil.JoinWithinRoot(s.cfg.Root, rel)
+	mode := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("mode")))
+	if mode == "" {
+		mode = "overwrite"
+	}
+	if mode != "error" && mode != "skip" && mode != "overwrite" && mode != "rename" {
+		http.Error(w, "bad mode", http.StatusBadRequest)
+		return
+	}
+	cfg := s.cfgForReq(r)
+	absDir, err := fsutil.ResolveWithinRoot(cfg.Root, rel, cfg.FollowSymlinks)
 	if err != nil {
 		http.Error(w, "bad path", http.StatusBadRequest)
 		return
@@ -665,7 +1719,13 @@ func (s *Server) handleMultipartUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer src.Close()
 
-	tmp := filepath.Join(s.cfg.StateDir, "uploads", fmt.Sprintf("mp-%d.tmp", time.Now().UnixNano()))
+	store, _, err := s.shareDeps(r)
+	if err != nil {
+		http.Error(w, "server init failed", http.StatusInternalServerError)
+		return
+	}
+
+	tmp := filepath.Join(cfg.StateDir, "uploads", fmt.Sprintf("mp-%d.tmp", time.Now().UnixNano()))
 	if err := os.MkdirAll(filepath.Dir(tmp), 0o755); err != nil {
 		http.Error(w, "tmp failed", http.StatusInternalServerError)
 		return
@@ -683,18 +1743,50 @@ func (s *Server) handleMultipartUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sha, blob, size, err := s.dedup.Put(r.Context(), tmp)
+	sha, blob, size, err := store.Put(r.Context(), tmp)
 	if err != nil {
 		http.Error(w, "dedup failed", http.StatusInternalServerError)
 		return
 	}
 
-	dstAbs := filepath.Join(absDir, fh.Filename)
+	// conflict handling
+	dstRel := joinRel(rel, fh.Filename)
+	dstAbs, err := fsutil.ResolveWithinRoot(cfg.Root, dstRel, cfg.FollowSymlinks)
+	if err != nil {
+		http.Error(w, "bad path", http.StatusBadRequest)
+		return
+	}
+	if _, err := os.Stat(dstAbs); err == nil {
+		switch mode {
+		case "skip":
+			_ = os.Remove(tmp)
+			writeJSON(w, map[string]any{"ok": true, "skipped": true, "path": dstRel})
+			return
+		case "error":
+			_ = os.Remove(tmp)
+			http.Error(w, "destination exists", http.StatusConflict)
+			return
+		case "rename":
+			nm, err := uniqueNameInDir(absDir, filepath.Base(dstRel))
+			if err != nil {
+				http.Error(w, "write failed", http.StatusInternalServerError)
+				return
+			}
+			dstRel = joinRel(rel, nm)
+			dstAbs, err = fsutil.ResolveWithinRoot(cfg.Root, dstRel, cfg.FollowSymlinks)
+			if err != nil {
+				http.Error(w, "bad path", http.StatusBadRequest)
+				return
+			}
+		case "overwrite":
+			// ok
+		}
+	}
 	if err := dedup.LinkOrCopy(blob, dstAbs); err != nil {
 		http.Error(w, "write failed", http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]any{"ok": true, "sha256": sha, "size": size})
+	writeJSON(w, map[string]any{"ok": true, "sha256": sha, "size": size, "path": dstRel})
 }
 
 func firstFile(mf *multipart.Form) *multipart.FileHeader {
@@ -723,6 +1815,14 @@ func (s *Server) handleUploads(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPost:
 		dest := fsutil.CleanRelPath(r.URL.Query().Get("path"))
+		mode := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("mode")))
+		if mode == "" {
+			mode = "overwrite"
+		}
+		if mode != "error" && mode != "skip" && mode != "overwrite" && mode != "rename" {
+			http.Error(w, "bad mode", http.StatusBadRequest)
+			return
+		}
 		total := int64(-1)
 		if v := r.URL.Query().Get("size"); v != "" {
 			// best-effort
@@ -730,12 +1830,65 @@ func (s *Server) handleUploads(w http.ResponseWriter, r *http.Request) {
 				total = n
 			}
 		}
-		sess, err := s.uploads.Create(dest, total)
+		if dest == "" {
+			http.Error(w, "missing path", http.StatusBadRequest)
+			return
+		}
+		cfg := s.cfgForReq(r)
+		// require write on destination path
+		if ok, err := s.allowed(r, auth.PermWrite, "/"+dest); err != nil || !ok {
+			if s.shouldChallenge(r) {
+				s.authChallenge(w)
+			} else {
+				http.Error(w, "forbidden", http.StatusForbidden)
+			}
+			return
+		}
+		// conflict handling
+		finalDest := dest
+		destAbs, err := fsutil.ResolveWithinRoot(cfg.Root, dest, cfg.FollowSymlinks)
+		if err != nil {
+			http.Error(w, "bad path", http.StatusBadRequest)
+			return
+		}
+		if _, err := os.Stat(destAbs); err == nil {
+			switch mode {
+			case "skip":
+				writeJSON(w, map[string]any{"skipped": true, "path": dest})
+				return
+			case "error":
+				http.Error(w, "destination exists", http.StatusConflict)
+				return
+			case "rename":
+				parentRel := path.Dir("/" + dest)
+				parentRel = strings.TrimPrefix(parentRel, "/")
+				parentAbs, err := fsutil.ResolveWithinRoot(cfg.Root, parentRel, cfg.FollowSymlinks)
+				if err != nil {
+					http.Error(w, "bad path", http.StatusBadRequest)
+					return
+				}
+				nm, err := uniqueNameInDir(parentAbs, filepath.Base(dest))
+				if err != nil {
+					http.Error(w, "create failed", http.StatusInternalServerError)
+					return
+				}
+				finalDest = joinRel(parentRel, nm)
+			case "overwrite":
+				// ok
+			}
+		}
+
+		_, up, err := s.shareDeps(r)
+		if err != nil {
+			http.Error(w, "server init failed", http.StatusInternalServerError)
+			return
+		}
+		sess, err := up.Create(finalDest, total)
 		if err != nil {
 			http.Error(w, "create failed", http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, map[string]any{"id": sess.ID, "offset": sess.Offset, "size": sess.Size})
+		writeJSON(w, map[string]any{"id": sess.ID, "offset": sess.Offset, "size": sess.Size, "dest": sess.DestRel})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -755,7 +1908,13 @@ func (s *Server) handleUploadID(w http.ResponseWriter, r *http.Request) {
 	id = strings.TrimSuffix(id, "/")
 
 	// Path-aware ACL: resumable uploads are always write-scoped to the destination.
-	sess, ok := s.uploads.Get(id)
+	cfg := s.cfgForReq(r)
+	_, up, err := s.shareDeps(r)
+	if err != nil {
+		http.Error(w, "server init failed", http.StatusInternalServerError)
+		return
+	}
+	sess, ok := up.Get(id)
 	if !ok {
 		http.NotFound(w, r)
 		return
@@ -774,7 +1933,7 @@ func (s *Server) handleUploadID(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		dst, sha, size, err := s.uploads.Finish(r.Context(), id)
+		dst, sha, size, err := up.Finish(r.Context(), id)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				http.NotFound(w, r)
@@ -783,7 +1942,7 @@ func (s *Server) handleUploadID(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		rel, _ := filepath.Rel(s.cfg.Root, dst)
+		rel, _ := filepath.Rel(cfg.Root, dst)
 		rel = filepath.ToSlash(rel)
 		writeJSON(w, map[string]any{"ok": true, "path": rel, "sha256": sha, "size": size})
 		return
@@ -792,8 +1951,15 @@ func (s *Server) handleUploadID(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		writeJSON(w, map[string]any{"id": sess.ID, "offset": sess.Offset, "size": sess.Size, "dest": sess.DestRel})
+	case http.MethodDelete:
+		// cancel upload session
+		if err := up.Cancel(id); err != nil && !errors.Is(err, os.ErrNotExist) {
+			http.Error(w, "cancel failed", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true})
 	case http.MethodPatch:
-		sess, err := s.uploads.Patch(r.Context(), id, r)
+		sess, err := up.Patch(r.Context(), id, r)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				http.NotFound(w, r)
@@ -906,9 +2072,10 @@ func (s *Server) handleZip(w http.ResponseWriter, r *http.Request) {
 		abs string
 		st  os.FileInfo
 	}
+	cfg := s.cfgForReq(r)
 	items := make([]item, 0, len(paths))
 	for _, p := range paths {
-		abs, err := fsutil.JoinWithinRoot(s.cfg.Root, p)
+		abs, err := fsutil.ResolveWithinRoot(cfg.Root, p, cfg.FollowSymlinks)
 		if err != nil {
 			http.Error(w, "bad path", http.StatusBadRequest)
 			return
@@ -1003,10 +2170,142 @@ func (s *Server) handleZip(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) handleZipList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	rel := fsutil.CleanRelPath(r.URL.Query().Get("path"))
+	if rel == "" {
+		http.Error(w, "missing path", http.StatusBadRequest)
+		return
+	}
+	cfg := s.cfgForReq(r)
+	abs, err := fsutil.ResolveWithinRoot(cfg.Root, rel, cfg.FollowSymlinks)
+	if err != nil {
+		http.Error(w, "bad path", http.StatusBadRequest)
+		return
+	}
+	st, err := os.Stat(abs)
+	if err != nil || st.IsDir() {
+		http.NotFound(w, r)
+		return
+	}
+	if strings.ToLower(filepath.Ext(abs)) != ".zip" {
+		http.Error(w, "not a zip", http.StatusBadRequest)
+		return
+	}
+	zr, err := zip.OpenReader(abs)
+	if err != nil {
+		http.Error(w, "open zip failed", http.StatusBadRequest)
+		return
+	}
+	defer zr.Close()
+
+	type ent struct {
+		Name  string `json:"name"`
+		IsDir bool   `json:"isDir"`
+		Size  uint64 `json:"size"`
+		CSize uint64 `json:"csize"`
+		Mtime int64  `json:"mtime"`
+	}
+	const maxEntries = 5000
+	out := make([]ent, 0, min(len(zr.File), 256))
+	var truncated bool
+	for i, f := range zr.File {
+		if i >= maxEntries {
+			truncated = true
+			break
+		}
+		fi := f.FileInfo()
+		isDir := fi != nil && fi.IsDir()
+		out = append(out, ent{
+			Name:  f.Name,
+			IsDir: isDir || strings.HasSuffix(f.Name, "/"),
+			Size:  f.UncompressedSize64,
+			CSize: f.CompressedSize64,
+			Mtime: f.Modified.Unix(),
+		})
+	}
+	writeJSON(w, map[string]any{
+		"path":      rel,
+		"entries":   out,
+		"truncated": truncated,
+	})
+}
+
+func (s *Server) handleZipGet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	rel := fsutil.CleanRelPath(r.URL.Query().Get("path"))
+	entry := r.URL.Query().Get("entry")
+	if rel == "" || strings.TrimSpace(entry) == "" {
+		http.Error(w, "missing params", http.StatusBadRequest)
+		return
+	}
+
+	cfg := s.cfgForReq(r)
+	abs, err := fsutil.ResolveWithinRoot(cfg.Root, rel, cfg.FollowSymlinks)
+	if err != nil {
+		http.Error(w, "bad path", http.StatusBadRequest)
+		return
+	}
+	st, err := os.Stat(abs)
+	if err != nil || st.IsDir() {
+		http.NotFound(w, r)
+		return
+	}
+	if strings.ToLower(filepath.Ext(abs)) != ".zip" {
+		http.Error(w, "not a zip", http.StatusBadRequest)
+		return
+	}
+	zr, err := zip.OpenReader(abs)
+	if err != nil {
+		http.Error(w, "open zip failed", http.StatusBadRequest)
+		return
+	}
+	defer zr.Close()
+
+	var zf *zip.File
+	for _, f := range zr.File {
+		if f.Name == entry {
+			zf = f
+			break
+		}
+	}
+	if zf == nil {
+		http.NotFound(w, r)
+		return
+	}
+	if zf.FileInfo() != nil && zf.FileInfo().IsDir() {
+		http.Error(w, "is a directory", http.StatusBadRequest)
+		return
+	}
+	rc, err := zf.Open()
+	if err != nil {
+		http.Error(w, "open entry failed", http.StatusBadRequest)
+		return
+	}
+	defer rc.Close()
+
+	fn := path.Base(zf.Name)
+	if fn == "" || fn == "." || fn == "/" {
+		fn = "file"
+	}
+	if ct := contentTypeForName(fn); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", fn))
+	_, _ = io.Copy(w, rc)
+}
+
 func (s *Server) handleThumb(w http.ResponseWriter, r *http.Request) {
 	// Very small thumbnailer: supports jpg/png/gif input, outputs jpeg.
 	rel := fsutil.CleanRelPath(r.URL.Query().Get("path"))
 	max := 256
+	kind := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("t"))) // ""|"txt"
 	if sv := strings.TrimSpace(r.URL.Query().Get("s")); sv != "" {
 		if n, err := strconv.Atoi(sv); err == nil {
 			if n < 64 {
@@ -1018,7 +2317,8 @@ func (s *Server) handleThumb(w http.ResponseWriter, r *http.Request) {
 			max = n
 		}
 	}
-	abs, err := fsutil.JoinWithinRoot(s.cfg.Root, rel)
+	cfg := s.cfgForReq(r)
+	abs, err := fsutil.ResolveWithinRoot(cfg.Root, rel, cfg.FollowSymlinks)
 	if err != nil {
 		http.Error(w, "bad path", http.StatusBadRequest)
 		return
@@ -1029,14 +2329,14 @@ func (s *Server) handleThumb(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ext := strings.ToLower(filepath.Ext(abs))
-	if !isImageExt(ext) {
+	if !isImageExt(ext) && !(kind == "txt" && isTextExt(ext)) {
 		http.NotFound(w, r)
 		return
 	}
 
-	thumbDir := filepath.Join(s.cfg.StateDir, "thumbs")
+	thumbDir := filepath.Join(cfg.StateDir, "thumbs")
 	_ = os.MkdirAll(thumbDir, 0o755)
-	key := safeKey(rel) + "-" + fmt.Sprintf("%d", st.ModTime().Unix()) + "-" + fmt.Sprintf("%d", max) + ".jpg"
+	key := safeKey(rel) + "-" + fmt.Sprintf("%d", st.ModTime().Unix()) + "-" + fmt.Sprintf("%d", max) + "-" + kind + ".jpg"
 	thumbPath := filepath.Join(thumbDir, key)
 
 	// Strong cache key: changes when file mtime or requested size changes.
@@ -1055,7 +2355,12 @@ func (s *Server) handleThumb(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(b)
 		return
 	}
-	b, err := makeThumb(abs, max)
+	var b []byte
+	if kind == "txt" && isTextExt(ext) {
+		b, err = s.thumbDo(key, func() ([]byte, error) { return makeTextThumb(abs, max) })
+	} else {
+		b, err = s.thumbDo(key, func() ([]byte, error) { return makeThumb(abs, max) })
+	}
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -1083,6 +2388,38 @@ func writeJSON(w http.ResponseWriter, v any) {
 	_ = enc.Encode(v)
 }
 
+func (s *Server) thumbDo(key string, fn func() ([]byte, error)) ([]byte, error) {
+	// Lazy init.
+	s.thumbMu.Lock()
+	if s.thumbInflight == nil {
+		s.thumbInflight = map[string]*thumbCall{}
+	}
+	if s.thumbSem == nil {
+		s.thumbSem = make(chan struct{}, 4) // small parallelism cap
+	}
+	if c, ok := s.thumbInflight[key]; ok {
+		s.thumbMu.Unlock()
+		<-c.done
+		return c.b, c.err
+	}
+	c := &thumbCall{done: make(chan struct{})}
+	s.thumbInflight[key] = c
+	s.thumbMu.Unlock()
+
+	// compute
+	s.thumbSem <- struct{}{}
+	b, err := fn()
+	<-s.thumbSem
+
+	s.thumbMu.Lock()
+	c.b = b
+	c.err = err
+	close(c.done)
+	delete(s.thumbInflight, key)
+	s.thumbMu.Unlock()
+	return b, err
+}
+
 func urlQueryEscape(s string) string {
 	return url.QueryEscape(s)
 }
@@ -1093,9 +2430,121 @@ func parseInt64(s string) (int64, error) {
 	return n, err
 }
 
+func copyFileAtomic(src, dst string, overwrite bool) error {
+	if !overwrite {
+		if _, err := os.Stat(dst); err == nil {
+			return os.ErrExist
+		}
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	tmp := dst + fmt.Sprintf(".tmp-%d", time.Now().UnixNano())
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	_, cErr := io.Copy(out, in)
+	sErr := out.Sync()
+	clErr := out.Close()
+	if cErr != nil {
+		_ = os.Remove(tmp)
+		return cErr
+	}
+	if sErr != nil {
+		_ = os.Remove(tmp)
+		return sErr
+	}
+	if clErr != nil {
+		_ = os.Remove(tmp)
+		return clErr
+	}
+	if overwrite {
+		_ = os.Remove(dst)
+	} else {
+		if _, err := os.Stat(dst); err == nil {
+			_ = os.Remove(tmp)
+			return os.ErrExist
+		}
+	}
+	return os.Rename(tmp, dst)
+}
+
+func copyDirNoSymlinks(srcDir, dstDir string, overwrite bool) error {
+	// Create destination dir (or ensure it exists if overwrite allows).
+	if st, err := os.Stat(dstDir); err == nil {
+		if !st.IsDir() {
+			if !overwrite {
+				return os.ErrExist
+			}
+			_ = os.RemoveAll(dstDir)
+		}
+	}
+	if err := os.MkdirAll(dstDir, 0o755); err != nil {
+		return err
+	}
+	return filepath.WalkDir(srcDir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		// Skip symlinks (avoid loops / escaping).
+		if d.Type()&os.ModeSymlink != 0 {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, err := filepath.Rel(srcDir, p)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		dst := filepath.Join(dstDir, rel)
+		if d.IsDir() {
+			return os.MkdirAll(dst, 0o755)
+		}
+		return copyFileAtomic(p, dst, overwrite)
+	})
+}
+
+func uniqueNameInDir(dirAbs, base string) (string, error) {
+	// "file.txt" -> "file (1).txt"
+	ext := filepath.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
+	if stem == "" {
+		stem = base
+		ext = ""
+	}
+	for i := 1; i < 10_000; i++ {
+		cand := fmt.Sprintf("%s (%d)%s", stem, i, ext)
+		if _, err := os.Stat(filepath.Join(dirAbs, cand)); errors.Is(err, os.ErrNotExist) {
+			return cand, nil
+		}
+	}
+	return "", fmt.Errorf("no free name")
+}
+
 func isImageExt(ext string) bool {
 	switch ext {
 	case ".jpg", ".jpeg", ".png", ".gif", ".webp":
+		return true
+	default:
+		return false
+	}
+}
+
+func isTextExt(ext string) bool {
+	switch ext {
+	case ".txt", ".log", ".md", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
+		".go", ".js", ".ts", ".tsx", ".jsx", ".py", ".rs", ".java", ".c", ".h", ".cpp", ".hpp", ".sh", ".css", ".html":
 		return true
 	default:
 		return false

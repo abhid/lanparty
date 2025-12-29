@@ -17,6 +17,12 @@ import (
 	"lanparty/internal/httpserver"
 )
 
+var (
+	version = "dev"
+	commit  = ""
+	builtAt = ""
+)
+
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
@@ -26,12 +32,26 @@ func main() {
 	}
 
 	var (
-		addr     = flag.String("addr", "0.0.0.0:3923", "listen address")
-		root     = flag.String("root", "", "share root (required if -config is not set)")
-		stateDir = flag.String("state", "", "state dir for uploads/dedup/thumbs (default: <root>/.lanparty)")
-		cfgPath  = flag.String("config", "", "path to config json (optional)")
+		addr      = flag.String("addr", "0.0.0.0:3923", "listen address")
+		root      = flag.String("root", "", "share root (required if -config is not set)")
+		stateDir  = flag.String("state", "", "state dir for uploads/dedup/thumbs (default: <root>/.lanparty)")
+		cfgPath   = flag.String("config", "", "path to config json (optional)")
+		portable  = flag.Bool("portable", false, "store all state in ./ .lanparty-state instead of inside share roots (useful for portable/readonly shares)")
+		followSym = flag.Bool("follow-symlinks", false, "allow following symlinks/junctions (only when resolved target stays inside the share root)")
+		showVer   = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
+
+	if *showVer {
+		fmt.Printf("lanparty %s\n", version)
+		if commit != "" {
+			fmt.Printf("commit: %s\n", commit)
+		}
+		if builtAt != "" {
+			fmt.Printf("built:  %s\n", builtAt)
+		}
+		return
+	}
 
 	var cfg config.Config
 	if *cfgPath != "" {
@@ -51,28 +71,87 @@ func main() {
 	}
 
 	if cfg.Root == "" {
-		log.Fatalf("config: root is required")
+		if len(cfg.Shares) == 0 {
+			log.Fatalf("config: root is required (or define shares)")
+		}
 	}
-	absRoot, err := filepath.Abs(cfg.Root)
-	if err != nil {
-		log.Fatalf("abs root: %v", err)
+
+	if *followSym {
+		cfg.FollowSymlinks = true
+		for name, sh := range cfg.Shares {
+			if sh.FollowSymlinks == nil || !*sh.FollowSymlinks {
+				val := true
+				sh.FollowSymlinks = &val
+				cfg.Shares[name] = sh
+			}
+		}
 	}
-	cfg.Root = absRoot
-	if cfg.StateDir == "" {
-		cfg.StateDir = filepath.Join(cfg.Root, ".lanparty")
+	// Portable state: keep runtime state out of share roots.
+	var portableBase string
+	if *portable {
+		cwd, _ := os.Getwd()
+		portableBase = filepath.Join(cwd, ".lanparty-state")
 	}
-	if err := os.MkdirAll(cfg.StateDir, 0o755); err != nil {
-		log.Fatalf("mkdir state: %v", err)
+
+	if cfg.Root != "" {
+		absRoot, err := filepath.Abs(cfg.Root)
+		if err != nil {
+			log.Fatalf("abs root: %v", err)
+		}
+		cfg.Root = absRoot
+		if cfg.StateDir == "" {
+			if portableBase != "" {
+				cfg.StateDir = filepath.Join(portableBase, "default")
+			} else {
+				cfg.StateDir = filepath.Join(cfg.Root, ".lanparty")
+			}
+		}
+		if err := os.MkdirAll(cfg.StateDir, 0o755); err != nil {
+			log.Fatalf("mkdir state: %v", err)
+		}
+	}
+	// Normalize shares.
+	for name, sh := range cfg.Shares {
+		if strings.TrimSpace(name) == "" {
+			log.Fatalf("config: share name cannot be empty")
+		}
+		if strings.TrimSpace(sh.Root) == "" {
+			log.Fatalf("config: share %q missing root", name)
+		}
+		absRoot, err := filepath.Abs(sh.Root)
+		if err != nil {
+			log.Fatalf("abs share root (%s): %v", name, err)
+		}
+		sh.Root = absRoot
+		if sh.StateDir == "" {
+			if portableBase != "" {
+				sh.StateDir = filepath.Join(portableBase, "share-"+name)
+			} else {
+				sh.StateDir = filepath.Join(sh.Root, ".lanparty")
+			}
+		}
+		if err := os.MkdirAll(sh.StateDir, 0o755); err != nil {
+			log.Fatalf("mkdir share state (%s): %v", name, err)
+		}
+		cfg.Shares[name] = sh
 	}
 
 	srv, err := httpserver.New(httpserver.Options{
 		Config: cfg,
+		ConfigPath: *cfgPath,
 	})
 	if err != nil {
 		log.Fatalf("server init: %v", err)
 	}
 
-	log.Printf("lanparty listening on http://%s (root=%s)", *addr, cfg.Root)
+	if cfg.Root != "" {
+		log.Printf("lanparty listening on http://%s (root=%s)", *addr, cfg.Root)
+	} else {
+		log.Printf("lanparty listening on http://%s (root=<none>; shares=%d)", *addr, len(cfg.Shares))
+	}
+	if portableBase != "" {
+		log.Printf("portable state dir: %s", portableBase)
+	}
 	log.Printf("webdav endpoint: http://%s/dav/  (use BasicAuth if configured)", *addr)
 	if err := http.ListenAndServe(*addr, withHeaders(srv.Handler())); err != nil {
 		log.Fatalf("listen: %v", err)

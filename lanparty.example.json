@@ -2,19 +2,67 @@
   "root": "/srv/lanparty",
   "stateDir": "/srv/lanparty/.lanparty",
   "authOptional": true,
+  "followSymlinks": false,
+
   "users": {
-    "alice": {
-      "bcrypt": "$2a$10$REPLACE_THIS_WITH_OUTPUT_OF_lanparty_passwd"
-    }
+    "alice": { "bcrypt": "$2a$10$REPLACE_WITH_lanparty_passwd_OUTPUT" },
+    "bob":   { "bcrypt": "$2a$10$REPLACE_WITH_lanparty_passwd_OUTPUT" }
   },
+
+  "tokens": {
+    "REPLACE_WITH_RANDOM_TOKEN_FOR_AUTOMATION": "alice"
+  },
+
   "acls": [
     {
       "path": "/",
       "read": ["*"],
-      "write": ["alice"],
+      "write": ["alice", "bob"],
       "admin": ["alice"]
+    },
+    {
+      "path": "/incoming",
+      "read": ["*"],
+      "write": ["bob"],
+      "admin": ["bob"]
     }
-  ]
+  ],
+
+  "shares": {
+    "media": {
+      "root": "/srv/media-share",
+      "stateDir": "/srv/media-share/.lanparty",
+      "followSymlinks": true,
+      "acls": [
+        {
+          "path": "/",
+          "read": ["*"],
+          "write": ["alice"],
+          "admin": ["alice"]
+        },
+        {
+          "path": "/family-dropbox",
+          "read": ["*"],
+          "write": ["alice", "bob"],
+          "admin": ["alice", "bob"]
+        }
+      ]
+    },
+
+    "dropbox": {
+      "root": "/srv/dropbox-share",
+      "stateDir": "/srv/dropbox-share/.lanparty",
+      "followSymlinks": false,
+      "acls": [
+        {
+          "path": "/",
+          "read": ["*"],
+          "write": ["bob"],
+          "admin": ["bob"]
+        }
+      ]
+    }
+  }
 }
 
 

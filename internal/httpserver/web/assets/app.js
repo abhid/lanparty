@@ -5,9 +5,14 @@ const crumbs = $("crumbs");
 const statusEl = $("status");
 const searchEl = $("search");
 const fileEl = $("file");
+const fileDirEl = $("filedir");
 const opUp = $("op-up");
 const opUpload = $("op-upload");
+const opUploadDir = $("op-upload-dir");
 const opMkdir = $("op-mkdir");
+const opCopy = $("op-copy");
+const opCut = $("op-cut");
+const opPaste = $("op-paste");
 const opZip = $("op-zip");
 const opClear = $("op-clear");
 const opWide = $("op-wide");
@@ -15,6 +20,11 @@ const opWide = $("op-wide");
 const modal = $("modal");
 const modalBackdrop = $("modal-backdrop");
 const pvClose = $("pv-close");
+const pvPrev = $("pv-prev");
+const pvNext = $("pv-next");
+const pvSlide = $("pv-slide");
+const pvEdit = $("pv-edit");
+const pvSave = $("pv-save");
 const pvTitle = $("pv-title");
 const pvBody = $("pv-body");
 const pvOpen = $("pv-open");
@@ -41,6 +51,12 @@ const treeCache = new Map(); // rel -> {dirs:[{name,path}], loaded:boolean}
 const treeOpen = new Set(); // rel paths expanded
 
 const toasts = $("toasts");
+const upqEl = $("upq");
+const upqBody = $("upq-body");
+const upqClear = $("upq-clear");
+
+let sortKey = "name"; // name|size|mtime
+let sortDir = 1; // 1 asc, -1 desc
 
 let lastList = [];
 let selected = new Set();
@@ -49,6 +65,13 @@ let ren = null; // {path, value}
 let renFocus = null; // path to focus after rerender
 
 let wideMode = false;
+
+const CLIP_KEY = "lanparty.clip";
+let clip = null; // {op:"copy"|"cut", paths:[...], base:string, ts:number}
+
+let pvCtx = null; // {items:[listItem], idx:number}
+let pvSlideTimer = null;
+let pvEditState = null; // {path, name, content, dirty}
 
 let lazyObs = null;
 function lazyInit() {
@@ -254,8 +277,20 @@ async function copyText(text) {
   }
 }
 
+// Share-aware base path:
+// - default share: ""
+// - named share:  "/s/<share>"
+const BASE = (() => {
+  try {
+    const p = String(location.pathname || "/");
+    const m = p.match(/^\/s\/([^/]+)(?:\/|$)/);
+    if (m && m[1]) return `/s/${m[1]}`;
+  } catch {}
+  return "";
+})();
+
 function fileUrl(rel, opts = {}) {
-  const base = `/f/${encPath(rel)}`;
+  const base = `${BASE}/f/${encPath(rel)}`;
   if (opts.dl) return `${base}?dl=1`;
   return base;
 }
@@ -275,7 +310,7 @@ function classify(item) {
 }
 
 function isPreviewable(kind) {
-  return ["image","video","audio","pdf","text"].includes(kind);
+  return ["image","video","audio","pdf","text","archive"].includes(kind);
 }
 
 function iconUse(id) {
@@ -288,11 +323,216 @@ function rerenderRows() {
   for (const it of (lastList || [])) rows.appendChild(rowFor(it));
 }
 
+function applySort() {
+  const key = sortKey;
+  const dir = sortDir;
+  lastList = (lastList || []).slice().sort((a, b) => {
+    if (!a || !b) return 0;
+    // folders first
+    if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+    let av, bv;
+    if (key === "size") {
+      av = Number(a.size || 0);
+      bv = Number(b.size || 0);
+    } else if (key === "mtime") {
+      av = Number(a.mtime || 0);
+      bv = Number(b.mtime || 0);
+    } else {
+      av = String(a.name || "").toLowerCase();
+      bv = String(b.name || "").toLowerCase();
+    }
+    if (av < bv) return -1 * dir;
+    if (av > bv) return 1 * dir;
+    return 0;
+  });
+}
+
+function updateSortHeader() {
+  const ths = document.querySelectorAll(".thead .sort");
+  ths.forEach((el) => {
+    const k = el.getAttribute("data-sort");
+    let label = (k === "name" ? "Name" : (k === "size" ? "Size" : "Modified"));
+    if (k === sortKey) label += sortDir > 0 ? " ▲" : " ▼";
+    el.textContent = label;
+  });
+}
+
 function thumbUrl(u, size) {
   if (!u) return u;
   const s = Number(size) || 0;
   if (s <= 0) return u;
   return u + (u.includes("?") ? "&" : "?") + `s=${encodeURIComponent(String(s))}`;
+}
+
+function loadClip() {
+  try {
+    const raw = localStorage.getItem(CLIP_KEY);
+    if (!raw) return null;
+    const c = JSON.parse(raw);
+    if (!c || (c.op !== "copy" && c.op !== "cut")) return null;
+    if (!Array.isArray(c.paths) || c.paths.length === 0) return null;
+    if (typeof c.base !== "string") c.base = "";
+    if (typeof c.ts !== "number") c.ts = Date.now();
+    return c;
+  } catch {
+    return null;
+  }
+}
+
+function saveClip(c) {
+  try {
+    if (!c) localStorage.removeItem(CLIP_KEY);
+    else localStorage.setItem(CLIP_KEY, JSON.stringify(c));
+  } catch {}
+}
+
+function setClip(op, paths) {
+  const ps = (paths || []).filter(Boolean);
+  if (ps.length === 0) return;
+  clip = {op, paths: ps, base: BASE, ts: Date.now()};
+  saveClip(clip);
+  updateSelectionUI();
+  toast(op === "cut" ? "Cut to clipboard" : "Copied to clipboard", {type: "ok", sub: `${ps.length} item(s)`});
+}
+
+function clearClip() {
+  clip = null;
+  saveClip(null);
+  updateSelectionUI();
+}
+
+function choiceToast(msg, opts = {}) {
+  // Returns Promise<string|null>
+  if (!toasts) return Promise.resolve(null);
+  const type = opts.type || "info";
+  const sub = opts.sub || "";
+  const iconId = opts.icon || "paste";
+  const choices = Array.isArray(opts.choices) ? opts.choices : [];
+  if (choices.length === 0) return Promise.resolve(null);
+
+  return new Promise((resolve) => {
+    let mo = null;
+    let done = false;
+    const finish = (v) => {
+      if (done) return;
+      done = true;
+      try { mo?.disconnect(); } catch {}
+      if (el.isConnected) el.remove();
+      resolve(v);
+    };
+
+    const el = document.createElement("div");
+    el.className = `toast ${type} confirm`;
+
+    const i = document.createElement("div");
+    i.className = "ti";
+    i.innerHTML = iconUse(iconId);
+
+    const msgEl = document.createElement("div");
+    msgEl.className = "msg";
+    msgEl.textContent = msg;
+
+    if (sub) {
+      const s = document.createElement("div");
+      s.className = "sub";
+      s.textContent = sub;
+      msgEl.appendChild(s);
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "acts";
+    for (const c of choices) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "act" + (c.danger ? " danger" : "");
+      b.textContent = c.label || c.value;
+      b.onclick = (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        finish(String(c.value));
+      };
+      actions.appendChild(b);
+    }
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "act";
+    cancel.textContent = opts.cancelLabel || "Cancel";
+    cancel.onclick = (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      finish(null);
+    };
+    actions.appendChild(cancel);
+    msgEl.appendChild(actions);
+
+    const x = document.createElement("button");
+    x.type = "button";
+    x.className = "x";
+    x.innerHTML = iconUse("close");
+    x.onclick = (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      finish(null);
+    };
+
+    const row = document.createElement("div");
+    row.className = "trow";
+    row.appendChild(i);
+    row.appendChild(msgEl);
+    row.appendChild(x);
+    el.appendChild(row);
+
+    el.onclick = (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+    };
+
+    toasts.appendChild(el);
+    pruneToasts();
+    mo = new MutationObserver(() => {
+      if (!el.isConnected) finish(null);
+    });
+    mo.observe(toasts, {childList: true});
+  });
+}
+
+async function pasteTo(destDirRel) {
+  if (!clip || !Array.isArray(clip.paths) || clip.paths.length === 0) return;
+  if (clip.base !== BASE) {
+    toast("Clipboard is from a different share", {type:"err", dur: 4500});
+    return;
+  }
+  let mode = "rename";
+  try {
+    const saved = localStorage.getItem("lanpartyPasteMode");
+    if (saved) mode = saved;
+  } catch {}
+  const picked = await choiceToast("Paste options", {
+    sub: "Choose conflict behavior",
+    icon: "paste",
+    type: "info",
+    choices: [
+      {value: "rename", label: "Keep both"},
+      {value: "overwrite", label: "Replace", danger: true},
+      {value: "skip", label: "Skip existing"},
+    ]
+  });
+  if (picked) mode = picked;
+  if (!mode) return;
+  try { localStorage.setItem("lanpartyPasteMode", mode); } catch {}
+  try {
+    if (clip.op === "cut") {
+      await apiMove(clip.paths, destDirRel || "", mode);
+      clearClip();
+      toast("Moved", {type: "ok", sub: `${clip.paths.length} item(s)`});
+    } else {
+      await apiCopy(clip.paths, destDirRel || "", mode);
+      toast("Copied", {type: "ok", sub: `${clip.paths.length} item(s)`});
+    }
+    await refresh();
+  } catch (e) {
+    toast("Paste failed", {type:"err", sub: String(e), dur: 4500});
+  }
 }
 
 function setWideMode(on) {
@@ -459,12 +699,65 @@ function showCtx(x, y, item) {
 
   addSep();
 
+  // Clipboard ops
+  if (selCount > 0) {
+    addItem("copy", hasMulti ? `Copy (${selCount})` : "Copy", async () => setClip("copy", [...selected.values()]), {k: "Ctrl+C"});
+    addItem("cut", hasMulti ? `Cut (${selCount})` : "Cut", async () => setClip("cut", [...selected.values()]), {k: "Ctrl+X"});
+  } else {
+    addItem("copy", "Copy", async () => setClip("copy", [item.path]), {k: "Ctrl+C"});
+    addItem("cut", "Cut", async () => setClip("cut", [item.path]), {k: "Ctrl+X"});
+  }
+  const canPaste = clip && Array.isArray(clip.paths) && clip.paths.length > 0 && clip.base === BASE;
+  if (canPaste) {
+    if (item.isDir) addItem("paste", "Paste into folder", async () => pasteTo(item.path), {k: "Ctrl+V"});
+    else addItem("paste", "Paste here", async () => pasteTo(curPath()), {k: "Ctrl+V"});
+  }
+
+  addSep();
+
+  if (hasMulti && isSel) {
+    addItem("edit", "Bulk rename…", async () => {
+      const find = prompt("Bulk rename: find (leave empty to only add prefix/suffix)", "");
+      const rep = prompt("Bulk rename: replace with", "");
+      const prefix = prompt("Prefix (optional)", "");
+      const suffix = prompt("Suffix (optional)", "");
+      let ok = 0, fail = 0;
+      for (const p of [...selected.values()]) {
+        const parts = p.split("/");
+        const base = parts.pop() || "";
+        const parent = parts.join("/");
+        let nb = base;
+        if (find != null && find !== "") nb = nb.split(find).join(rep ?? "");
+        if (prefix) nb = prefix + nb;
+        if (suffix) nb = nb + suffix;
+        if (nb === base) continue;
+        const dst = parent ? `${parent}/${nb}` : nb;
+        try {
+          await apiRename(p, dst);
+          ok++;
+        } catch {
+          fail++;
+        }
+      }
+      toast("Bulk rename done", {type: fail ? "err" : "ok", sub: `${ok} ok, ${fail} failed`, dur: fail ? 4500 : 2600});
+      await refresh();
+    });
+    addSep();
+  }
+
   addItem("link", "Copy link", async () => {
     const link = `${location.origin}${fileUrl(item.path)}`;
     const ok = await copyText(link);
     if (ok) toast("Copied link", {type: "ok", sub: link});
     else toast("Copy failed", {type: "err", sub: link, dur: 4500});
   });
+
+  if (!item.isDir && kind === "text") {
+    addItem("edit", "Edit…", async () => {
+      await openPreview(item, {keepCtx:false});
+      pvEdit?.click();
+    }, {k: "E"});
+  }
 
   addItem("edit", "Rename…", async () => {
     startRename(item);
@@ -503,10 +796,70 @@ function showCtx(x, y, item) {
   ctx.style.top = `${top}px`;
 }
 
+function showCtxBg(x, y) {
+  ctxItem = null;
+  ctx.innerHTML = "";
+
+  const addSep = () => {
+    const s = document.createElement("div");
+    s.className = "sep";
+    ctx.appendChild(s);
+  };
+  const addItem = (icon, label, fn, opts = {}) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "mi" + (opts.danger ? " danger" : "");
+    b.setAttribute("role", "menuitem");
+    b.innerHTML = `${iconUse(icon)}<span class="lab">${label}</span>` + (opts.k ? `<span class="k">${opts.k}</span>` : "");
+    b.onclick = async (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      hideCtx();
+      try { await fn(); } catch (e) { setStatus(String(e)); }
+    };
+    ctx.appendChild(b);
+  };
+
+  const canPaste = clip && Array.isArray(clip.paths) && clip.paths.length > 0 && clip.base === BASE;
+  if (canPaste) addItem("paste", "Paste", async () => pasteTo(curPath()), {k: "Ctrl+V"});
+  addItem("upload", "Upload…", async () => fileEl?.click());
+  if (opUploadDir && fileDirEl) addItem("folderup", "Upload folder…", async () => fileDirEl?.click());
+  addItem("newfolder", "New folder…", async () => opMkdir?.click?.());
+  addItem("text", "New file…", async () => {
+    const name = prompt("File name:");
+    if (!name) return;
+    const dir = curPath();
+    const rel = dir ? `${dir}/${name}` : name;
+    await openPreview({name, path: rel, isDir: false, mime: "text/plain", size: 0, mtime: 0}, {keepCtx:false});
+    pvEdit?.click();
+  });
+
+  addSep();
+  if (clip) addItem("close", "Clear clipboard", async () => clearClip());
+
+  ctx.classList.remove("hidden");
+  ctxOpen = true;
+
+  ctx.style.left = "0px";
+  ctx.style.top = "0px";
+  const pad = 8;
+  const rect = ctx.getBoundingClientRect();
+  let left = x;
+  let top = y;
+  if (left + rect.width + pad > window.innerWidth) left = Math.max(pad, window.innerWidth - rect.width - pad);
+  if (top + rect.height + pad > window.innerHeight) top = Math.max(pad, window.innerHeight - rect.height - pad);
+  ctx.style.left = `${left}px`;
+  ctx.style.top = `${top}px`;
+}
+
 function updateSelectionUI() {
   updateStatusText();
   // enable/disable ops
   const hasSel = selected.size > 0;
+  if (opCopy) opCopy.disabled = !hasSel;
+  if (opCut) opCut.disabled = !hasSel;
+  const canPaste = clip && Array.isArray(clip.paths) && clip.paths.length > 0 && clip.base === BASE;
+  if (opPaste) opPaste.disabled = !canPaste;
   if (opZip) opZip.disabled = !hasSel;
   if (opClear) opClear.disabled = !hasSel;
 }
@@ -723,7 +1076,7 @@ function downloadZip(paths, name) {
   if (!paths || paths.length === 0) return;
   const form = document.createElement("form");
   form.method = "POST";
-  form.action = "/api/zip";
+  form.action = `${BASE}/api/zip`;
   form.target = "dlframe";
   form.style.display = "none";
 
@@ -757,7 +1110,7 @@ function downloadFile(rel) {
 }
 
 async function apiList(rel) {
-  const res = await fetch(`/api/list?path=${encodeURIComponent(rel || "")}`);
+  const res = await fetch(`${BASE}/api/list?path=${encodeURIComponent(rel || "")}`);
   if (!res.ok) throw new Error(await res.text());
   return await res.json();
 }
@@ -866,13 +1219,13 @@ async function renderTree() {
 }
 
 async function apiSearch(baseRel, q) {
-  const res = await fetch(`/api/search?path=${encodeURIComponent(baseRel || "")}&q=${encodeURIComponent(q)}`);
+  const res = await fetch(`${BASE}/api/search?path=${encodeURIComponent(baseRel || "")}&q=${encodeURIComponent(q)}`);
   if (!res.ok) throw new Error(await res.text());
   return await res.json();
 }
 
 async function apiMkdir(rel) {
-  const res = await fetch(`/api/mkdir`, {
+  const res = await fetch(`${BASE}/api/mkdir`, {
     method: "POST",
     headers: {"Content-Type":"application/json"},
     body: JSON.stringify({path: rel})
@@ -882,7 +1235,7 @@ async function apiMkdir(rel) {
 }
 
 async function apiRename(fromRel, toRel) {
-  const res = await fetch(`/api/rename`, {
+  const res = await fetch(`${BASE}/api/rename`, {
     method: "POST",
     headers: {"Content-Type":"application/json"},
     body: JSON.stringify({from: fromRel, to: toRel})
@@ -892,7 +1245,7 @@ async function apiRename(fromRel, toRel) {
 }
 
 async function apiDelete(rel) {
-  const res = await fetch(`/api/delete`, {
+  const res = await fetch(`${BASE}/api/delete`, {
     method: "POST",
     headers: {"Content-Type":"application/json"},
     body: JSON.stringify({path: rel})
@@ -902,13 +1255,13 @@ async function apiDelete(rel) {
 }
 
 async function apiUploadCreate(destRel, size) {
-  const res = await fetch(`/api/uploads?path=${encodeURIComponent(destRel)}&size=${encodeURIComponent(size)}`, {method:"POST"});
+  const res = await fetch(`${BASE}/api/uploads?path=${encodeURIComponent(destRel)}&size=${encodeURIComponent(size)}`, {method:"POST"});
   if (!res.ok) throw new Error(await res.text());
   return await res.json();
 }
 
 async function apiUploadPatch(id, start, end, total, blob) {
-  const res = await fetch(`/api/uploads/${encodeURIComponent(id)}`, {
+  const res = await fetch(`${BASE}/api/uploads/${encodeURIComponent(id)}`, {
     method: "PATCH",
     headers: {"Content-Range": `bytes ${start}-${end}/${total}`},
     body: blob
@@ -918,9 +1271,85 @@ async function apiUploadPatch(id, start, end, total, blob) {
 }
 
 async function apiUploadFinish(id) {
-  const res = await fetch(`/api/uploads/${encodeURIComponent(id)}/finish`, {method:"POST"});
+  const res = await fetch(`${BASE}/api/uploads/${encodeURIComponent(id)}/finish`, {method:"POST"});
   if (!res.ok) throw new Error(await res.text());
   return await res.json();
+}
+
+async function apiUploadCreate2(destRel, size, mode, signal) {
+  const url = `${BASE}/api/uploads?path=${encodeURIComponent(destRel)}&size=${encodeURIComponent(size)}&mode=${encodeURIComponent(mode || "overwrite")}`;
+  const res = await fetch(url, {method:"POST", signal});
+  if (!res.ok) throw new Error(await res.text());
+  return await res.json();
+}
+
+async function apiUploadGet(id, signal) {
+  const res = await fetch(`${BASE}/api/uploads/${encodeURIComponent(id)}`, {method:"GET", signal});
+  if (!res.ok) throw new Error(await res.text());
+  return await res.json();
+}
+
+async function apiUploadPatch2(id, start, end, total, blob, signal) {
+  const res = await fetch(`${BASE}/api/uploads/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: {"Content-Range": `bytes ${start}-${end}/${total}`},
+    body: blob,
+    signal,
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return await res.json();
+}
+
+async function apiUploadFinish2(id, signal) {
+  const res = await fetch(`${BASE}/api/uploads/${encodeURIComponent(id)}/finish`, {method:"POST", signal});
+  if (!res.ok) throw new Error(await res.text());
+  return await res.json();
+}
+
+async function apiUploadCancel(id) {
+  const res = await fetch(`${BASE}/api/uploads/${encodeURIComponent(id)}`, {method:"DELETE"});
+  if (!res.ok) throw new Error(await res.text());
+  return await res.json();
+}
+
+async function apiWrite(rel, content, mode = "overwrite") {
+  const res = await fetch(`${BASE}/api/write`, {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({path: rel, content, mode}),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return await res.json();
+}
+
+async function apiCopy(paths, destDir, mode = "rename") {
+  const res = await fetch(`${BASE}/api/copy`, {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({paths, destDir, mode}),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return await res.json();
+}
+
+async function apiMove(paths, destDir, mode = "rename") {
+  const res = await fetch(`${BASE}/api/move`, {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({paths, destDir, mode}),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return await res.json();
+}
+
+async function apiZipList(rel) {
+  const res = await fetch(`${BASE}/api/zipls?path=${encodeURIComponent(rel || "")}`);
+  if (!res.ok) throw new Error(await res.text());
+  return await res.json();
+}
+
+function zipEntryUrl(zipRel, entry) {
+  return `${BASE}/api/zipget?path=${encodeURIComponent(zipRel || "")}&entry=${encodeURIComponent(entry || "")}`;
 }
 
 function renderCrumbs(rel) {
@@ -970,9 +1399,51 @@ function closeModal() {
   pvBody.innerHTML = "";
   pvOpen.removeAttribute("href");
   pvDownload.removeAttribute("href");
+  pvEditState = null;
+  if (pvEdit) pvEdit.disabled = true;
+  if (pvSave) { pvSave.disabled = true; pvSave.innerHTML = `${iconUse("check")} Save`; }
+  pvCtx = null;
+  if (pvSlideTimer) {
+    try { window.clearInterval(pvSlideTimer); } catch {}
+    pvSlideTimer = null;
+  }
+  if (pvSlide) pvSlide.innerHTML = iconUse("play");
 }
 
-async function openPreview(item) {
+function previewableItemsInView() {
+  return (lastList || []).filter((it) => it && it.path && !it.isDir && isPreviewable(classify(it)));
+}
+
+function setPvCtxForItem(item) {
+  const items = previewableItemsInView();
+  const idx = items.findIndex((x) => x.path === item.path);
+  pvCtx = {items, idx: Math.max(0, idx)};
+  updatePvNav();
+}
+
+function updatePvNav() {
+  if (!pvPrev || !pvNext || !pvSlide) return;
+  const ok = pvCtx && pvCtx.items && pvCtx.items.length > 0;
+  pvPrev.disabled = !ok || pvCtx.idx <= 0;
+  pvNext.disabled = !ok || pvCtx.idx >= (pvCtx.items.length - 1);
+  // slideshow only makes sense for images
+  const cur = ok ? pvCtx.items[pvCtx.idx] : null;
+  const isImg = cur && classify(cur) === "image";
+  pvSlide.disabled = !isImg;
+  const isTxt = cur && classify(cur) === "text";
+  if (pvEdit) pvEdit.disabled = !isTxt;
+  if (pvSave && (!pvEditState || pvEditState.path !== (cur?.path || ""))) pvSave.disabled = true;
+}
+
+async function openPreviewAt(idx) {
+  if (!pvCtx || !pvCtx.items) return;
+  const i = Math.max(0, Math.min(pvCtx.items.length - 1, idx));
+  pvCtx.idx = i;
+  updatePvNav();
+  await openPreview(pvCtx.items[i], {keepCtx:true});
+}
+
+async function openPreview(item, opts = {}) {
   const kind = classify(item);
   const url = fileUrl(item.path);
   pvTitle.textContent = item.path || item.name || "";
@@ -982,6 +1453,7 @@ async function openPreview(item) {
 
   pvBody.innerHTML = "";
   openModal();
+  if (!opts.keepCtx) setPvCtxForItem(item);
 
   if (kind === "image") {
     const img = document.createElement("img");
@@ -1008,6 +1480,16 @@ async function openPreview(item) {
     a.autoplay = true;
     a.src = url;
     pvBody.appendChild(a);
+    // simple playlist: advance to next audio in view
+    a.addEventListener("ended", () => {
+      if (!pvCtx) return;
+      for (let j = pvCtx.idx + 1; j < pvCtx.items.length; j++) {
+        if (classify(pvCtx.items[j]) === "audio") {
+          openPreviewAt(j);
+          break;
+        }
+      }
+    });
     return;
   }
   if (kind === "pdf") {
@@ -1023,6 +1505,9 @@ async function openPreview(item) {
     pre.className = "pv-pre";
     pre.textContent = "Loading…";
     pvBody.appendChild(pre);
+    pvEditState = {path: item.path, name: item.name, content: "", dirty: false};
+    if (pvEdit) pvEdit.disabled = false;
+    if (pvSave) pvSave.disabled = true;
     try {
       // Avoid loading huge files: fetch only the first 256KiB via Range.
       const res = await fetch(url, {headers: {"Range": "bytes=0-262143"}});
@@ -1030,8 +1515,172 @@ async function openPreview(item) {
       let txt = await res.text();
       if (txt.length >= 262144) txt += "\n\n…(truncated)…";
       pre.textContent = txt;
+      pvEditState.content = txt.replace(/\n\n…\(truncated\)…\s*$/, "");
     } catch (e) {
       pre.textContent = `Preview failed: ${String(e)}`;
+    }
+    return;
+  }
+
+  if (kind === "archive") {
+    const name = String(item.name || "");
+    const ext = name.toLowerCase().includes(".") ? name.toLowerCase().slice(name.toLowerCase().lastIndexOf(".")) : "";
+    const box = document.createElement("div");
+    box.className = "pv-zip";
+    box.textContent = "Loading…";
+    pvBody.appendChild(box);
+
+    if (ext !== ".zip") {
+      box.textContent = "Archive preview is currently supported for .zip files only.";
+      return;
+    }
+
+    try {
+      const data = await apiZipList(item.path);
+      const entries = data.entries || [];
+      box.innerHTML = "";
+      let prefix = "";
+
+      const head = document.createElement("div");
+      head.className = "zhead";
+      box.appendChild(head);
+
+      const t = document.createElement("table");
+      t.className = "ztab";
+      const thead = document.createElement("thead");
+      thead.innerHTML = "<tr><th>Name</th><th class='right'>Size</th><th class='right'>Modified</th><th></th></tr>";
+      t.appendChild(thead);
+      const tb = document.createElement("tbody");
+      t.appendChild(tb);
+      box.appendChild(t);
+
+      const renderZip = () => {
+        tb.innerHTML = "";
+        head.innerHTML = "";
+
+        // breadcrumb
+        const bc = document.createElement("div");
+        bc.className = "zbc";
+        const mk = (label, pfx) => {
+          const b = document.createElement("button");
+          b.type = "button";
+          b.className = "crumb";
+          b.textContent = label;
+          b.onclick = () => { prefix = pfx; renderZip(); };
+          return b;
+        };
+        bc.appendChild(mk("/", ""));
+        if (prefix) {
+          const parts = prefix.split("/").filter(Boolean);
+          let acc = "";
+          for (const part of parts) {
+            acc += part + "/";
+            const sep = document.createElement("span");
+            sep.className = "sep";
+            sep.textContent = "/";
+            bc.appendChild(sep);
+            bc.appendChild(mk(part, acc));
+          }
+        }
+        head.appendChild(bc);
+
+        const meta = document.createElement("div");
+        meta.className = "zmeta";
+        meta.textContent = `${entries.length}${data.truncated ? "+" : ""} entries`;
+        head.appendChild(meta);
+
+        // collect direct children
+        const dirs = new Set();
+        const files = [];
+        for (const e of entries) {
+          const nm = String(e.name || "");
+          if (!nm.startsWith(prefix)) continue;
+          const rest = nm.slice(prefix.length);
+          if (!rest) continue;
+          const parts = rest.split("/");
+          const first = parts[0];
+          if (!first) continue;
+          if (parts.length > 1 || String(e.isDir) === "true" || nm.endsWith("/")) {
+            dirs.add(first);
+          } else {
+            files.push({...e, _disp: first});
+          }
+        }
+        const dirList = [...dirs.values()].sort((a,b)=>a.localeCompare(b));
+        files.sort((a,b)=>String(a._disp||"").localeCompare(String(b._disp||"")));
+
+        if (prefix) {
+          const up = document.createElement("tr");
+          const td = document.createElement("td");
+          td.className = "zname";
+          const b = document.createElement("button");
+          b.type = "button";
+          b.className = "subpath";
+          b.textContent = "..";
+          b.onclick = (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            const parts = prefix.split("/").filter(Boolean);
+            parts.pop();
+            prefix = parts.length ? (parts.join("/") + "/") : "";
+            renderZip();
+          };
+          td.appendChild(b);
+          up.appendChild(td);
+          up.innerHTML += "<td></td><td></td><td></td>";
+          tb.appendChild(up);
+        }
+
+        for (const d of dirList) {
+          const tr = document.createElement("tr");
+          const tdName = document.createElement("td");
+          tdName.className = "zname";
+          const b = document.createElement("button");
+          b.type = "button";
+          b.className = "subpath";
+          b.innerHTML = `${iconUse("folder")} ${d}/`;
+          b.onclick = (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            prefix = prefix + d + "/";
+            renderZip();
+          };
+          tdName.appendChild(b);
+          const tdSize = document.createElement("td"); tdSize.className = "right"; tdSize.textContent = "";
+          const tdMt = document.createElement("td"); tdMt.className = "right"; tdMt.textContent = "";
+          const tdAct = document.createElement("td"); tdAct.className = "right"; tdAct.textContent = "";
+          tr.appendChild(tdName); tr.appendChild(tdSize); tr.appendChild(tdMt); tr.appendChild(tdAct);
+          tb.appendChild(tr);
+        }
+
+        for (const e of files) {
+          const tr = document.createElement("tr");
+          const tdName = document.createElement("td");
+          tdName.className = "zname";
+          tdName.textContent = e._disp || e.name;
+          const tdSize = document.createElement("td");
+          tdSize.className = "right";
+          tdSize.textContent = fmtSize(Number(e.size || 0));
+          const tdMt = document.createElement("td");
+          tdMt.className = "right";
+          tdMt.textContent = e.mtime ? fmtTime(Number(e.mtime)) : "";
+          const tdAct = document.createElement("td");
+          tdAct.className = "right";
+          const a = document.createElement("a");
+          a.className = "btn ghost zdl";
+          a.href = zipEntryUrl(item.path, prefix + (e._disp || e.name));
+          a.target = "dlframe";
+          a.rel = "noreferrer";
+          a.innerHTML = `${iconUse("download")} Download`;
+          tdAct.appendChild(a);
+          tr.appendChild(tdName); tr.appendChild(tdSize); tr.appendChild(tdMt); tr.appendChild(tdAct);
+          tb.appendChild(tr);
+        }
+      };
+
+      renderZip();
+    } catch (e) {
+      box.textContent = `Archive preview failed: ${String(e)}`;
     }
     return;
   }
@@ -1054,11 +1703,18 @@ function rowFor(item) {
 
   const ico = document.createElement("div");
   ico.className = "ico";
-  if (item.thumb && kind === "image") {
+  if (item.thumb && (kind === "image" || kind === "text")) {
     ico.classList.add("thumb");
     ico.style.backgroundImage = `url("${item.thumb}")`;
   } else {
     ico.innerHTML = iconUse(kind);
+  }
+  if (item.isLink) {
+    const b = document.createElement("div");
+    b.className = "lnkbad";
+    b.innerHTML = iconUse("link");
+    if (item.linkTo) b.title = `Link → ${item.linkTo}`;
+    ico.appendChild(b);
   }
 
   let fname;
@@ -1216,6 +1872,13 @@ function rowForTile(item) {
     img.alt = item.name || "";
     img.src = thumbUrl(item.thumb, 768);
     prev.appendChild(img);
+  } else if (kind === "text" && item.thumb) {
+    const img = document.createElement("img");
+    img.loading = "lazy";
+    img.decoding = "async";
+    img.alt = item.name || "";
+    img.src = thumbUrl(item.thumb, 768);
+    prev.appendChild(img);
   } else if (kind === "image") {
     const img = document.createElement("img");
     img.loading = "lazy";
@@ -1267,6 +1930,13 @@ function rowForTile(item) {
     prev.innerHTML = iconUse("folder");
   } else {
     prev.innerHTML = iconUse(kind);
+  }
+  if (item.isLink) {
+    const b = document.createElement("div");
+    b.className = "lnkbad";
+    b.innerHTML = iconUse("link");
+    if (item.linkTo) b.title = `Link → ${item.linkTo}`;
+    prev.appendChild(b);
   }
 
   const namecell = document.createElement("div");
@@ -1892,6 +2562,7 @@ async function refresh() {
     if (q) {
       const data = await apiSearch(rel, q);
       lastList = data.items || [];
+      applySort();
       selected = new Set();
       lastClickedIndex = -1;
       for (const it of lastList) rows.appendChild(rowFor(it));
@@ -1910,6 +2581,7 @@ async function refresh() {
 
     const data = await apiList(rel);
     lastList = data.items || [];
+    applySort();
     selected = new Set(); // clear selection on navigation
     lastClickedIndex = -1;
     for (const it of data.items || []) rows.appendChild(rowFor(it));
@@ -1932,57 +2604,256 @@ async function doSearch() {
   setView(base, q);
 }
 
-async function uploadFile(file, dirRel, idx, total) {
-  const destRel = dirRel ? `${dirRel}/${file.name}` : file.name;
-  const chunkSize = 8 * 1024 * 1024;
+// --- upload queue ---
+const UP_CHUNK = 8 * 1024 * 1024;
+const UP_MAX = 3;
+let upTasks = []; // [{tid,file,destRel,mode,status,sessionId,offset,err,createdAt}]
+let upRunning = 0;
+let upTid = 0;
 
-  const prefix = (idx && total) ? `(${idx}/${total}) ` : "";
-  const t = toast(`${prefix}Uploading ${file.name}`, {
-    type: "info",
-    dur: 0, // persistent while uploading
-    progress: 0,
-    sub: `${fmtSize(0)} / ${fmtSize(file.size)} (0%)`,
-  });
+function showUpqIfNeeded() {
+  if (!upqEl) return;
+  const any = upTasks.length > 0;
+  upqEl.classList.toggle("hidden", !any);
+}
 
-  try {
-    setStatus(`Uploading ${file.name} (${fmtSize(file.size)})…`);
-    const sess = await apiUploadCreate(destRel, file.size);
-    let offset = sess.offset || 0;
+function fmtPct(done, total) {
+  if (!total) return "0%";
+  return `${Math.floor((done / total) * 100)}%`;
+}
 
-    while (offset < file.size) {
-      const end = Math.min(file.size - 1, offset + chunkSize - 1);
-      const blob = file.slice(offset, end + 1);
-      const r = await apiUploadPatch(sess.id, offset, end, file.size, blob);
-      offset = r.offset || (end + 1);
-      const pct = Math.floor((offset / file.size) * 100);
-      setStatus(`Uploading ${file.name}… ${pct}%`);
-      t?.setProgress(pct);
-      t?.setSub(`${fmtSize(offset)} / ${fmtSize(file.size)} (${pct}%)`);
-    }
+function renderUpq() {
+  if (!upqBody || !upqEl) return;
+  showUpqIfNeeded();
+  upqBody.innerHTML = "";
+  for (const t of upTasks) {
+    const row = document.createElement("div");
+    row.className = "urow" + (t.status === "error" ? " err" : (t.status === "done" || t.status === "skipped" ? " ok" : ""));
 
-    await apiUploadFinish(sess.id);
-    t?.close();
-    toast(`Uploaded ${file.name}`, {type: "ok", sub: fmtSize(file.size)});
-    setStatus(`Uploaded ${file.name}`);
-  } catch (e) {
-    t?.close();
-    toast(`Upload failed: ${file.name}`, {type: "err", sub: String(e)});
-    throw e;
+    const info = document.createElement("div");
+    info.className = "uinfo";
+    const nm = document.createElement("div");
+    nm.className = "uname";
+    nm.textContent = t.destRel || (t.file?.name || "upload");
+    const sub = document.createElement("div");
+    sub.className = "usub";
+    let subTxt = "";
+    if (t.status === "queued") subTxt = "Queued";
+    else if (t.status === "running") subTxt = `Uploading… ${fmtSize(t.offset)} / ${fmtSize(t.file.size)} (${fmtPct(t.offset, t.file.size)})`;
+    else if (t.status === "paused") subTxt = `Paused at ${fmtPct(t.offset, t.file.size)}`;
+    else if (t.status === "done") subTxt = "Done";
+    else if (t.status === "skipped") subTxt = "Skipped (exists)";
+    else if (t.status === "canceled") subTxt = "Canceled";
+    else if (t.status === "error") subTxt = `Failed: ${t.err || "unknown error"}`;
+    sub.textContent = subTxt;
+
+    const bar = document.createElement("div");
+    bar.className = "ubar";
+    const barIn = document.createElement("div");
+    const pct = t.file?.size ? Math.floor((t.offset / t.file.size) * 100) : 0;
+    barIn.style.width = `${Math.max(0, Math.min(100, pct))}%`;
+    bar.appendChild(barIn);
+
+    info.appendChild(nm);
+    info.appendChild(sub);
+    info.appendChild(bar);
+
+    const acts = document.createElement("div");
+    acts.className = "uacts";
+
+    const mkBtn = (icon, title, on, disabled) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "opbtn";
+      b.title = title;
+      b.innerHTML = iconUse(icon);
+      if (disabled) b.disabled = true;
+      b.onclick = (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        on();
+      };
+      return b;
+    };
+
+    const canPause = t.status === "running";
+    const canResume = t.status === "paused";
+    const canRetry = t.status === "error";
+    const canCancel = ["queued","running","paused","error"].includes(t.status);
+
+    acts.appendChild(mkBtn(canResume ? "play" : "pause", canResume ? "Resume" : "Pause", () => {
+      if (t.status === "running") pauseUpload(t.tid);
+      else if (t.status === "paused") resumeUpload(t.tid);
+    }, !(canPause || canResume)));
+
+    acts.appendChild(mkBtn("retry", "Retry", () => retryUpload(t.tid), !canRetry));
+    acts.appendChild(mkBtn("close", "Cancel", () => cancelUpload(t.tid), !canCancel));
+
+    row.appendChild(info);
+    row.appendChild(acts);
+    upqBody.appendChild(row);
   }
 }
 
-async function uploadFiles(files) {
+async function pickUploadMode() {
+  let mode = "overwrite";
+  try {
+    const saved = localStorage.getItem("lanpartyUploadMode");
+    if (saved) mode = saved;
+  } catch {}
+  const picked = await choiceToast("Upload options", {
+    sub: "Choose conflict behavior",
+    icon: "upload",
+    type: "info",
+    choices: [
+      {value: "rename", label: "Keep both"},
+      {value: "overwrite", label: "Replace", danger: true},
+      {value: "skip", label: "Skip existing"},
+      {value: "error", label: "Error if exists"},
+    ],
+    cancelLabel: "Cancel",
+  });
+  if (picked == null) return null;
+  mode = picked;
+  try { localStorage.setItem("lanpartyUploadMode", mode); } catch {}
+  return mode;
+}
+
+async function enqueueUploads(files, useRelativePaths) {
+  const mode = await pickUploadMode();
+  if (!mode) return;
   const dir = curPath();
-  for (let i = 0; i < files.length; i++) {
-    const f = files[i];
-    try {
-      await uploadFile(f, dir, i + 1, files.length);
-    } catch (e) {
-      setStatus(`Upload failed: ${String(e)}`);
-      throw e;
-    }
+  const list = [...(files || [])].filter((f) => f && f.name);
+  for (const f of list) {
+    const rp = useRelativePaths ? String(f.webkitRelativePath || f.name || "") : String(f.name || "");
+    const destRel = dir ? `${dir}/${rp}` : rp;
+    upTasks.push({
+      tid: ++upTid,
+      file: f,
+      destRel,
+      mode,
+      status: "queued",
+      sessionId: null,
+      offset: 0,
+      err: "",
+      createdAt: Date.now(),
+    });
   }
-  await refresh();
+  renderUpq();
+  pumpUploads();
+}
+
+function findTask(tid) {
+  return upTasks.find((t) => t.tid === tid);
+}
+
+function pauseUpload(tid) {
+  const t = findTask(tid);
+  if (!t || t.status !== "running") return;
+  t.status = "paused";
+  try { t.ctrl?.abort(); } catch {}
+  renderUpq();
+}
+
+function resumeUpload(tid) {
+  const t = findTask(tid);
+  if (!t || t.status !== "paused") return;
+  t.status = "queued";
+  renderUpq();
+  pumpUploads();
+}
+
+async function cancelUpload(tid) {
+  const t = findTask(tid);
+  if (!t) return;
+  if (t.status === "running") {
+    t.status = "canceled";
+    try { t.ctrl?.abort(); } catch {}
+  } else {
+    t.status = "canceled";
+  }
+  renderUpq();
+  if (t.sessionId) {
+    try { await apiUploadCancel(t.sessionId); } catch {}
+  }
+}
+
+async function retryUpload(tid) {
+  const t = findTask(tid);
+  if (!t || t.status !== "error") return;
+  if (t.sessionId) {
+    try { await apiUploadCancel(t.sessionId); } catch {}
+  }
+  t.sessionId = null;
+  t.offset = 0;
+  t.err = "";
+  t.status = "queued";
+  renderUpq();
+  pumpUploads();
+}
+
+function pumpUploads() {
+  if (upRunning >= UP_MAX) return;
+  while (upRunning < UP_MAX) {
+    const next = upTasks.find((t) => t.status === "queued");
+    if (!next) break;
+    upRunning++;
+    next.status = "running";
+    renderUpq();
+    runUploadTask(next).finally(() => {
+      upRunning = Math.max(0, upRunning - 1);
+      renderUpq();
+      pumpUploads();
+    });
+  }
+}
+
+async function runUploadTask(t) {
+  const file = t.file;
+  if (!file) return;
+  t.ctrl = new AbortController();
+  try {
+    // Create or resume session.
+    if (!t.sessionId) {
+      const sess = await apiUploadCreate2(t.destRel, file.size, t.mode, t.ctrl.signal);
+      if (sess && sess.skipped) {
+        t.status = "skipped";
+        return;
+      }
+      t.sessionId = sess.id;
+      if (sess.dest) t.destRel = sess.dest;
+      t.offset = sess.offset || 0;
+    } else {
+      // Sync offset in case previous request completed but the client aborted.
+      const st = await apiUploadGet(t.sessionId, t.ctrl.signal);
+      if (st && st.offset != null) t.offset = Number(st.offset) || 0;
+    }
+
+    while (t.offset < file.size) {
+      if (t.status !== "running") return;
+      const end = Math.min(file.size - 1, t.offset + UP_CHUNK - 1);
+      const blob = file.slice(t.offset, end + 1);
+      const r = await apiUploadPatch2(t.sessionId, t.offset, end, file.size, blob, t.ctrl.signal);
+      t.offset = r.offset || (end + 1);
+      renderUpq();
+    }
+    if (t.status !== "running") return;
+    await apiUploadFinish2(t.sessionId, t.ctrl.signal);
+    t.status = "done";
+    toast("Uploaded", {type:"ok", sub: t.destRel});
+    await refresh();
+  } catch (e) {
+    const msg = String(e);
+    const isAbort = (e && (e.name === "AbortError" || msg.includes("AbortError"))) || msg.includes("aborted");
+    if (isAbort && (t.status === "paused" || t.status === "canceled")) {
+      return;
+    }
+    t.status = "error";
+    t.err = msg;
+    toast("Upload failed", {type:"err", sub: msg, dur: 4500});
+  } finally {
+    t.ctrl = null;
+  }
 }
 
 // events
@@ -1990,14 +2861,39 @@ window.addEventListener("hashchange", () => refresh());
 searchEl.addEventListener("keydown", (e) => {
   if (e.key === "Enter") doSearch();
 });
+
+// OneDrive-ish: sortable columns
+document.querySelectorAll(".thead .sort").forEach((el) => {
+  const k = el.getAttribute("data-sort") || "name";
+  const act = () => {
+    if (sortKey === k) sortDir *= -1;
+    else { sortKey = k; sortDir = 1; }
+    applySort();
+    rerenderRows();
+    updateSortHeader();
+  };
+  el.addEventListener("click", (ev) => { ev.preventDefault(); act(); });
+  el.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); act(); }
+  });
+});
+updateSortHeader();
 fileEl.addEventListener("change", async (e) => {
   const files = [...(e.target.files || [])];
   e.target.value = "";
-  if (files.length) await uploadFiles(files);
+  if (files.length) await enqueueUploads(files, false);
+});
+fileDirEl?.addEventListener("change", async (e) => {
+  const files = [...(e.target.files || [])];
+  e.target.value = "";
+  if (files.length) await enqueueUploads(files, true);
 });
 
 if (opUpload) opUpload.onclick = () => {
   fileEl?.click();
+};
+if (opUploadDir) opUploadDir.onclick = () => {
+  fileDirEl?.click();
 };
 if (opWide) opWide.onclick = () => {
   setWideMode(!wideMode);
@@ -2022,6 +2918,10 @@ if (opMkdir) opMkdir.onclick = async () => {
   }
 };
 
+if (opCopy) opCopy.onclick = () => setClip("copy", [...selected.values()]);
+if (opCut) opCut.onclick = () => setClip("cut", [...selected.values()]);
+if (opPaste) opPaste.onclick = () => pasteTo(curPath());
+
 if (opZip) opZip.onclick = () => downloadSelectedZip();
 if (opClear) opClear.onclick = () => {
   selected = new Set();
@@ -2035,15 +2935,111 @@ document.addEventListener("dragover", (e) => { e.preventDefault(); });
 document.addEventListener("drop", async (e) => {
   e.preventDefault();
   const files = [...(e.dataTransfer?.files || [])];
-  if (files.length) await uploadFiles(files);
+  if (files.length) await enqueueUploads(files, false);
 });
+
+if (upqClear) upqClear.onclick = () => {
+  upTasks = upTasks.filter((t) => !["done","skipped","canceled"].includes(t.status));
+  renderUpq();
+};
+
+// background context menu (empty space)
+rows?.addEventListener("contextmenu", (ev) => {
+  // If the event originated inside a row, row handler will take it.
+  const row = ev.target?.closest?.(".row");
+  if (row) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  hideCtx();
+  showCtxBg(ev.clientX, ev.clientY);
+}, true);
 
 // modal interactions
 modalBackdrop.onclick = () => closeModal();
 pvClose.onclick = () => closeModal();
+if (pvPrev) pvPrev.onclick = () => openPreviewAt((pvCtx?.idx ?? 0) - 1);
+if (pvNext) pvNext.onclick = () => openPreviewAt((pvCtx?.idx ?? 0) + 1);
+if (pvSlide) pvSlide.onclick = () => {
+  if (!pvCtx || !pvCtx.items || pvCtx.items.length === 0) return;
+  const cur = pvCtx.items[pvCtx.idx];
+  if (!cur || classify(cur) !== "image") return;
+  if (pvSlideTimer) {
+    try { window.clearInterval(pvSlideTimer); } catch {}
+    pvSlideTimer = null;
+    pvSlide.innerHTML = iconUse("play");
+    return;
+  }
+  pvSlide.innerHTML = iconUse("pause");
+  pvSlideTimer = window.setInterval(() => {
+    if (!pvCtx) return;
+    const n = pvCtx.idx + 1;
+    if (n >= pvCtx.items.length) {
+      // stop at end
+      try { window.clearInterval(pvSlideTimer); } catch {}
+      pvSlideTimer = null;
+      if (pvSlide) pvSlide.innerHTML = iconUse("play");
+      return;
+    }
+    openPreviewAt(n);
+  }, 2500);
+};
+if (pvEdit) pvEdit.onclick = async () => {
+  if (!pvEditState || !pvEditState.path) return;
+  // Load full file (best-effort) up to 1MiB for editing.
+  const max = 1024 * 1024;
+  try {
+    const res = await fetch(fileUrl(pvEditState.path), {headers: {"Range": `bytes=0-${max-1}`}});
+    if (!res.ok && res.status !== 206) throw new Error(await res.text());
+    let txt = await res.text();
+    if (txt.length >= max) {
+      toast("File too large to edit in browser", {type:"err", sub:`Limit ${fmtSize(max)}`, dur: 4500});
+      return;
+    }
+    pvEditState.content = txt;
+    pvEditState.dirty = false;
+
+    pvBody.innerHTML = "";
+    const ta = document.createElement("textarea");
+    ta.className = "pv-pre";
+    ta.style.width = "100%";
+    ta.style.minHeight = "60vh";
+    ta.value = txt;
+    ta.oninput = () => {
+      pvEditState.content = ta.value;
+      pvEditState.dirty = true;
+      if (pvSave) pvSave.disabled = false;
+    };
+    pvBody.appendChild(ta);
+    ta.focus();
+    if (pvSave) pvSave.disabled = true;
+  } catch (e) {
+    toast("Edit failed", {type:"err", sub:String(e), dur: 4500});
+  }
+};
+if (pvSave) pvSave.onclick = async () => {
+  if (!pvEditState || !pvEditState.path) return;
+  const content = pvEditState.content ?? "";
+  pvSave.disabled = true;
+  pvSave.innerHTML = `${iconUse("check")} Saving…`;
+  try {
+    const r = await apiWrite(pvEditState.path, content, "overwrite");
+    toast("Saved", {type:"ok", sub: r.path || pvEditState.path});
+    pvEditState.dirty = false;
+    pvSave.innerHTML = `${iconUse("check")} Save`;
+    await refresh();
+  } catch (e) {
+    pvSave.disabled = false;
+    pvSave.innerHTML = `${iconUse("check")} Save`;
+    toast("Save failed", {type:"err", sub:String(e), dur: 4500});
+  }
+};
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !modal.classList.contains("hidden")) closeModal();
   if (e.key === "Escape" && ctxOpen) hideCtx();
+  if (!modal.classList.contains("hidden")) {
+    if (e.key === "ArrowLeft") { e.preventDefault(); openPreviewAt((pvCtx?.idx ?? 0) - 1); }
+    if (e.key === "ArrowRight") { e.preventDefault(); openPreviewAt((pvCtx?.idx ?? 0) + 1); }
+  }
 });
 
 // context menu interactions
@@ -2087,6 +3083,28 @@ document.addEventListener("keydown", async (e) => {
     return;
   }
 
+  if (meta && key === "c") {
+    if (selected.size > 0) {
+      e.preventDefault();
+      setClip("copy", [...selected.values()]);
+    }
+    return;
+  }
+  if (meta && key === "x") {
+    if (selected.size > 0) {
+      e.preventDefault();
+      setClip("cut", [...selected.values()]);
+    }
+    return;
+  }
+  if (meta && key === "v") {
+    if (clip && Array.isArray(clip.paths) && clip.paths.length > 0) {
+      e.preventDefault();
+      await pasteTo(curPath());
+    }
+    return;
+  }
+
   if ((e.key === "Delete" || e.key === "Backspace") && selected.size > 0) {
     e.preventDefault();
     await deleteSelectionFromKeyboard();
@@ -2094,6 +3112,8 @@ document.addEventListener("keydown", async (e) => {
 }, true);
 
 initWideMode();
+clip = loadClip();
+updateSelectionUI();
 refresh();
 
 

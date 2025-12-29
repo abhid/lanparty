@@ -95,5 +95,3 @@ jobs:
           generate_release_notes: true
           files: |
             dist/*
-*** End Patch"}Ошибка codebase tool call: The function is not valid JSON. Parameters must be a JSON object. Please follow the schema exactly. While calling apply_patch, it expects FREEFORM not JSON. Need plain string. Let's redo. We'll use functions.apply_patch with freeform patch string. Ensure no JSON. We'll call tool now. Let's do.}"]}需要 call apply_patch no JSON. We'll fix. We'll mention update. We'll call apply_patch. But we must not mention analysis. We'll in commentary call tool. Let's do."/> to=functions.apply_patch? Actually tool wrapper: functions.apply_patch is FREEFORM. Use in assistant commentary channel. We'll call now with patch. We'll ensure patch ends. Let's proceed. We'll also consider build.yml triggers; might run on tags too; fine. We'll run lints maybe. We'll call read_lints after. We'll not run python.
-

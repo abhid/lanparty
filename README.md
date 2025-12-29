@@ -88,8 +88,10 @@ binary and your data.
 - CLI flags for portable mode, symlink traversal, and version stamping.
 
 #### Admin & automation
-- `/admin` UI to edit global settings (root, state dir, ACLs, shares), generate bcrypt hashes, and manage users/tokens entirely from the browser.
-- When lanparty runs with `-config`, changes are saved back to the JSON file so the server and config stay in sync.
+- GitHub-style `/admin` console with sidebar panes (Server, ACLs, Shares, Users, Tokens, Tools) that mirrors the JSON config.
+- Inline tables let you edit roots, state dirs, share metadata, ACL rules, and more with dirty-state tracking, Save/Discard buttons, and toast feedback.
+- When lanparty runs with `-config`, saving writes directly back to that JSON file; otherwise the UI clearly marks changes as runtime-only.
+- User/token management (create, delete, revoke, copy) plus a bcrypt generator live in the same UI, and every action has a matching REST endpoint.
 - GitHub Actions build/release pipeline produces cross-platform binaries on every tag.
 
 ### UI tour
@@ -179,6 +181,23 @@ Key fields:
 
 Refer to the example config for advanced scenarios: per-share ACLs, public dropboxes, multiple tokens, etc.
 
+> Tip: Everything above is editable from the `/admin` UI. When lanparty is started with `-config /path/to/config.json`, the **Save changes** button writes directly to that file (the UI shows the resolved path and whether disk writes are enabled). Without `-config`, edits still apply immediately but are marked “runtime only” and disappear after a restart.
+
+#### Admin ACL quick start
+
+Add a dedicated rule for the admin console so you control who can open `/admin`:
+
+```json
+{
+  "path": "/admin",
+  "read": ["alice"],
+  "write": ["alice"],
+  "admin": ["alice"]
+}
+```
+
+On startup, lanparty checks for such a rule. If none exists it generates a random `admin-xxxxx` user, adds an `/admin` ACL for that account, and prints the credentials to the terminal so that you can sign in once and immediately replace the bootstrap user with your own entry.
+
 ### Shares & virtual roots
 
 Define a `shares` map to expose multiple folders:
@@ -224,14 +243,31 @@ When both config and flags are supplied, flags act as defaults the config can ov
 
 ### Admin UI
 
-Visit `/admin` to:
+`/admin` is a GitHub-style settings surface that manipulates the same JSON you would edit by hand.
 
-- Generate bcrypt hashes through the browser (with copy button).
-- View current users/tokens and add/remove them (persists back to your config if launched with `-config`).
-- Create bearer tokens tied to users; copy them directly for scripts.
-- Inspect the effective config (rendered JSON) for quick debugging.
+#### Access & bootstrap
+- Every request must satisfy an ACL rule that grants `admin` permission to `/admin`. Reuse the “Admin ACL quick start” snippet above or tailor it per share.
+- When no such rule exists, lanparty auto-generates a random `admin-xxxxx` user with a dedicated `/admin` ACL, prints the credentials once, and expects you to replace that bootstrap account immediately.
 
-All admin endpoints require `admin` ACL.
+#### Layout & workflow
+- The sidebar lists **Server**, **ACLs**, **Shares**, **Users**, **Tokens**, and **Tools** panes. Selecting one swaps the main content without a full page load.
+- The summary stack shows the resolved config path, whether writes are persisted, and the last status message. Save/Discard buttons stay disabled until something changes.
+- Saving calls `PUT /api/admin/config`; if lanparty was started with `-config`, the JSON file is rewritten atomically. Discard triggers `GET /api/admin/config` to reload from disk.
+
+#### Config panes
+- **Server**: Edit `root`, `stateDir`, `followSymlinks`, and `authOptional` via compact tables with inline hints.
+- **ACLs**: Manage the global first-match list. Each row exposes read/write/admin arrays, path cleaning, and delete buttons. Entries are saved in the order shown, and the backend normalizes slashes/duplicates before persisting.
+- **Shares**: Add/remove virtual roots, edit per-share roots/state dirs, and open a detail row to tweak share-specific ACLs without leaving the table. Share names map directly to `/s/<name>/`.
+
+#### Accounts & tokens
+- **Users**: Use the form at the top to enter username, password, and optional bcrypt cost. The table below lists existing users with delete actions. Saving persists to the config file when possible and always revokes associated tokens when a user is deleted.
+- **Tokens**: Generate a bearer token for any existing user, copy it, and revoke it later. The list shows each token’s first eight characters plus the mapped username so you can identify secrets without dumping the entire value.
+
+#### Tools
+- **Bcrypt generator**: Browser-based helper for `POST /api/admin/bcrypt`, complete with cost control and copy-to-clipboard so you never have to leave the page for hashing.
+
+#### Automation
+- Everything in the UI is backed by documented endpoints: `GET/PUT /api/admin/config`, `GET /api/admin/state`, `POST/DELETE /api/admin/users`, `POST/DELETE /api/admin/tokens`, and `POST /api/admin/bcrypt`. All of them require an account with `admin` permission and return a `persisted` flag plus the active `configPath`, which is useful when scripting Terraform/Ansible style workflows.
 
 ### Upload workflows
 
@@ -260,8 +296,11 @@ Conflict handling values: `rename`, `overwrite`, `skip`, `error`.
 | Copy/Move | `POST /api/copy` / `POST /api/move` with `{"sources":[],"dest":"","mode":"rename"}` |
 | Write file | `POST /api/write` `{ "path": "notes/todo.txt", "data": "..." }` |
 | Thumbnail | `GET /thumb?path=<rel>&w=256` |
-| Admin bcrypt | `POST /api/admin/bcrypt` `{ "password": "..." }` |
-| Admin users/tokens | `GET/POST/DELETE /api/admin/users|tokens` |
+| Admin config (read/save) | `GET /api/admin/config`, `PUT /api/admin/config` (body mirrors the JSON config). |
+| Admin state summary | `GET /api/admin/state` → returns `users`, `tokens` (first 8 chars), `persisted`, `configPath`. |
+| Admin users | `POST /api/admin/users` `{ "username": "...", "password": "...", "cost": 10 }`; `DELETE /api/admin/users` `{ "username": "..." }`. |
+| Admin tokens | `POST /api/admin/tokens` `{ "username": "..." }`; `DELETE /api/admin/tokens` `{ "token": "..." }`. |
+| Admin bcrypt | `POST /api/admin/bcrypt` `{ "password": "...", "cost": 10 }`. |
 
 Each share has its own API namespace: `/s/<share>/api/...`.
 
@@ -289,7 +328,7 @@ Each share has its own API namespace: `/s/<share>/api/...`.
 - Server-side thumbnails for PDFs, text/code snippets, audio cover art.
 - Background thumbnail worker pool with eviction/prefetching.
 - Advanced streaming: stronger HTTP Range handling for all media types.
-- Richer admin UI for ACL editing, share management, and token rotation.
+- Admin change history + approvals (diff the JSON before writes, optional dual-control).
 
 ### Credits
 

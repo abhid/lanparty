@@ -978,6 +978,9 @@ body.wide .tilemeta{
   align-items:center;
   gap:6px;
 }
+body[data-admin-disabled="1"] .admin-link{
+  display:none;
+}
 .footnote .i{width:14px;height:14px}
 .link{
   color:var(--accent);

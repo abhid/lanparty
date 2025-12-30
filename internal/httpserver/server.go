@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"archive/zip"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/rand"
@@ -387,6 +388,9 @@ func (s *Server) Handler() http.Handler {
 		if err != nil {
 			http.Error(w, "missing ui", http.StatusInternalServerError)
 			return
+		}
+		if s.disableAdmin {
+			b = markAdminDisabledHTML(b)
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(b)
@@ -2996,4 +3000,26 @@ func sanitizeZipPath(p string) string {
 		p = p[:240]
 	}
 	return p
+}
+
+func markAdminDisabledHTML(b []byte) []byte {
+	const bodyTag = "<body"
+	idx := bytes.Index(b, []byte(bodyTag))
+	if idx < 0 {
+		return b
+	}
+	end := bytes.IndexByte(b[idx:], '>')
+	if end < 0 {
+		return b
+	}
+	segment := b[idx : idx+end]
+	if bytes.Contains(segment, []byte("data-admin-disabled")) {
+		return b
+	}
+	var buf bytes.Buffer
+	buf.Grow(len(b) + 32)
+	buf.Write(b[:idx+len(bodyTag)])
+	buf.WriteString(` data-admin-disabled="1"`)
+	buf.Write(b[idx+len(bodyTag):])
+	return buf.Bytes()
 }

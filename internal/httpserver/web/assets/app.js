@@ -109,13 +109,22 @@ function encPath(rel) {
 
 function decodeHashRel(raw) {
   if (!raw) return "";
-  return raw.split("/").filter(Boolean).map((seg) => {
-    try {
-      return decodeURIComponent(seg);
-    } catch {
-      return seg;
+  const decodeSeg = (seg) => {
+    if (!seg) return "";
+    let prev = seg;
+    for (let i = 0; i < 5; i++) {
+      let next;
+      try {
+        next = decodeURIComponent(prev);
+      } catch {
+        return prev;
+      }
+      if (next === prev) return next;
+      prev = next;
     }
-  }).join("/");
+    return prev;
+  };
+  return raw.split("/").filter(Boolean).map(decodeSeg).join("/");
 }
 
 function encodeHashRel(rel) {

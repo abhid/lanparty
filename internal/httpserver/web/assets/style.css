@@ -66,6 +66,7 @@
 }
 
 :root{
+  --header-height:64px;
   --bg:#f6f8fa;
   --panel:#ffffff;
   --text:#1f2328;
@@ -90,9 +91,16 @@ body{
   line-height:1.45;
 }
 .topbar{
-  position:sticky; top:0; z-index:10;
-  display:flex; align-items:center; gap:10px;
+  position:fixed;
+  top:0;
+  left:0;
+  right:0;
+  z-index:30;
+  display:flex;
+  align-items:center;
+  gap:10px;
   padding:10px 16px;
+  min-height:var(--header-height);
   background:var(--panel);
   border-bottom:1px solid var(--line);
 }
@@ -216,7 +224,7 @@ body{
 }
 .btn.ghost:hover{background:rgba(31,35,40,.06)}
 .main{
-  padding:24px 16px 48px 16px;
+  padding:calc(24px + var(--header-height)) 16px 48px 16px;
   max-width:1120px;
   margin:0 auto;
 }
@@ -228,13 +236,13 @@ body{
 }
 .sidebar{
   position:sticky;
-  top:64px;
+  top:calc(var(--header-height) + 16px);
   border:1px solid var(--line);
   border-radius:12px;
   background:var(--panel);
   box-shadow:none;
   overflow:hidden;
-  max-height:calc(100vh - 90px);
+  max-height:calc(100vh - var(--header-height) - 32px);
   display:flex;
   flex-direction:column;
 }
@@ -253,6 +261,7 @@ body{
 .tree{
   padding:8px;
   overflow:auto;
+  flex:1;
 }
 .trow{
   display:flex;
@@ -492,6 +501,9 @@ body.wide .tilemeta{
 }
 .hidden{display:none !important}
 .opbar{
+  position:sticky;
+  top:calc(var(--header-height) + 8px);
+  z-index:15;
   display:flex;
   align-items:center;
   gap:10px;

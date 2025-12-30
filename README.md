@@ -11,6 +11,7 @@ setups, embeds its UI assets, and ships the same polished experience everywhere.
 ### Table of contents
 
 - [Quick start](#quick-start)
+- [Docker](#docker)
 - [Downloads](#downloads)
 - [Features at a glance](#features-at-a-glance)
 - [UI tour](#ui-tour)
@@ -18,6 +19,7 @@ setups, embeds its UI assets, and ships the same polished experience everywhere.
 - [Configuration](#configuration)
 - [Shares & virtual roots](#shares--virtual-roots)
 - [CLI flags](#cli-flags)
+- [Environment variables](#environment-variables)
 - [Admin UI](#admin-ui)
 - [Upload workflows](#upload-workflows)
 - [API overview](#api-overview)
@@ -36,6 +38,25 @@ go run ./cmd/lanparty -root /path/to/share
 ```
 
 Open `http://localhost:3923`. Add files to the root you pointed at; they appear instantly.
+
+### Docker
+
+The repo ships with a multi-stage `Dockerfile` so you can run lanparty next to your datasets,
+preview files produced inside containers, or export generated artifacts without installing dependencies
+on the host:
+
+```bash
+docker build -t lanparty .
+docker run --rm -it \
+  -p 3923:3923 \
+  -v /srv/lanparty:/data \
+  -e LANPARTY_ROOT=/data \
+  -e LANPARTY_STATE_DIR=/data/.lanparty \
+  lanparty
+```
+
+Mount your own root/state directories, then layer on additional env vars / CLI flags as needed,
+for example `-follow-symlinks` or `LANPARTY_DISABLE_ADMIN=true` to lock down the admin UI.
 
 ### Downloads
 
@@ -182,6 +203,8 @@ Key fields:
 Refer to the example config for advanced scenarios: per-share ACLs, public dropboxes, multiple tokens, etc.
 
 > Tip: Everything above is editable from the `/admin` UI. When lanparty is started with `-config /path/to/config.json`, the **Save changes** button writes directly to that file (the UI shows the resolved path and whether disk writes are enabled). Without `-config`, edits still apply immediately but are marked “runtime only” and disappear after a restart.
+>
+> Prefer config-file-only workflows? Start lanparty with `-disable-admin` or export `LANPARTY_DISABLE_ADMIN=true` to remove `/admin` and the admin APIs entirely.
 
 #### Admin ACL quick start
 
@@ -237,9 +260,28 @@ Define a `shares` map to expose multiple folders:
 | `-config` | _none_ | Path to JSON config (see above). |
 | `-portable` | `false` | Store all runtime state under `./.lanparty-state/…` (per-share subfolders). |
 | `-follow-symlinks` | `false` | Allow symlink traversal that stays inside the share root. |
+| `-disable-admin` | `false` | Turn off `/admin` plus every `/api/admin/*` endpoint (config-only edits). |
 | `-version` | `false` | Print embedded version/commit/build info and exit. |
 
-When both config and flags are supplied, flags act as defaults the config can override.
+When both config and flags are supplied, flags act as defaults the config can override. Every
+flag above also respects a `LANPARTY_*` environment variable (see below); supplying a CLI flag
+wins over the env, and both are overridden by values coming from `-config`.
+
+### Environment variables
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `LANPARTY_ADDR` | `0.0.0.0:3923` | Listen address (same as `-addr`). |
+| `LANPARTY_ROOT` | _empty_ | Root path when not using `-config`. |
+| `LANPARTY_STATE_DIR` | `<root>/.lanparty` | Overrides the computed state dir. |
+| `LANPARTY_CONFIG` | _empty_ | Path to JSON config. |
+| `LANPARTY_PORTABLE` | `false` | Mirrors `-portable`. |
+| `LANPARTY_FOLLOW_SYMLINKS` | `false` | Mirrors `-follow-symlinks`. |
+| `LANPARTY_DISABLE_ADMIN` | `false` | Disables `/admin` and every `/api/admin/*` endpoint. |
+
+Setters follow Go’s `strconv.ParseBool`, so `true/false`, `1/0`, and `yes/no` all work. The
+resolved env value becomes the default seen by the matching CLI flag; providing the flag (or
+config) still wins when double-specified.
 
 ### Admin UI
 
@@ -303,6 +345,8 @@ Conflict handling values: `rename`, `overwrite`, `skip`, `error`.
 | Admin bcrypt | `POST /api/admin/bcrypt` `{ "password": "...", "cost": 10 }`. |
 
 Each share has its own API namespace: `/s/<share>/api/...`.
+
+> Admin endpoints only exist when lanparty starts without `-disable-admin` / `LANPARTY_DISABLE_ADMIN=true`.
 
 ### WebDAV
 

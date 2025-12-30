@@ -344,13 +344,13 @@ body{
 .listpane{min-width:0}
 .pvside{
   position:sticky;
-  top:64px;
+  top:calc(var(--header-height) + var(--content-gap));
   border:1px solid var(--line);
   border-radius:var(--radius-xl);
   background:var(--panel);
   box-shadow:none;
   overflow:hidden;
-  max-height:calc(100vh - 90px);
+  max-height:calc(100vh - var(--header-height) - 32px);
   display:flex;
   flex-direction:column;
 }
@@ -1084,7 +1084,7 @@ body.wide .tilemeta{
 /* admin */
 .admin-page .main{
   max-width:1120px;
-  padding:40px 16px 48px 16px;
+  padding:calc(var(--header-height) + var(--content-gap)) 16px 48px 16px;
   margin:0 auto;
 }
 .admin-shell{

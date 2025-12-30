@@ -19,6 +19,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -36,8 +37,9 @@ import (
 )
 
 type Options struct {
-	Config     config.Config
-	ConfigPath string
+	Config       config.Config
+	ConfigPath   string
+	DisableAdmin bool
 }
 
 type ctxKey int
@@ -53,9 +55,10 @@ func shareFromContext(ctx context.Context) string {
 }
 
 type Server struct {
-	cfg     config.Config
-	cfgMu   sync.RWMutex
-	cfgPath string
+	cfg          config.Config
+	cfgMu        sync.RWMutex
+	cfgPath      string
+	disableAdmin bool
 
 	mu       sync.Mutex
 	dedup    map[string]*dedup.Store
@@ -192,12 +195,13 @@ func New(opts Options) (*Server, error) {
 		return nil, err
 	}
 	return &Server{
-		cfg:      opts.Config,
-		cfgPath:  opts.ConfigPath,
-		dedup:    map[string]*dedup.Store{},
-		uploads:  map[string]*upload.Manager{},
-		davLocks: map[string]webdav.LockSystem{},
-		webFS:    sub,
+		cfg:          opts.Config,
+		cfgPath:      opts.ConfigPath,
+		disableAdmin: opts.DisableAdmin,
+		dedup:        map[string]*dedup.Store{},
+		uploads:      map[string]*upload.Manager{},
+		davLocks:     map[string]webdav.LockSystem{},
+		webFS:        sub,
 	}, nil
 }
 
@@ -390,33 +394,35 @@ func (s *Server) Handler() http.Handler {
 		return r.URL.Path == "/"
 	}))
 
-	// Admin page
-	inner.Handle("/admin", gzipIfAccepted(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/admin" {
-			http.NotFound(w, r)
-			return
-		}
-		ok, err := s.allowed(r, auth.PermAdmin, "/admin")
-		if err != nil {
-			http.Error(w, "forbidden", http.StatusForbidden)
-			return
-		}
-		if !ok {
-			if s.shouldChallenge(r) {
-				s.authChallenge(w)
-			} else {
-				http.Redirect(w, r, "/unauthorized", http.StatusFound)
+	if !s.disableAdmin {
+		// Admin page
+		inner.Handle("/admin", gzipIfAccepted(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/admin" {
+				http.NotFound(w, r)
+				return
 			}
-			return
-		}
-		b, err := fs.ReadFile(s.webFS, "admin.html")
-		if err != nil {
-			http.Error(w, "missing admin ui", http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write(b)
-	}), func(r *http.Request) bool { return r.URL.Path == "/admin" }))
+			ok, err := s.allowed(r, auth.PermAdmin, "/admin")
+			if err != nil {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+			if !ok {
+				if s.shouldChallenge(r) {
+					s.authChallenge(w)
+				} else {
+					http.Redirect(w, r, "/unauthorized", http.StatusFound)
+				}
+				return
+			}
+			b, err := fs.ReadFile(s.webFS, "admin.html")
+			if err != nil {
+				http.Error(w, "missing admin ui", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = w.Write(b)
+		}), func(r *http.Request) bool { return r.URL.Path == "/admin" }))
+	}
 
 	inner.Handle("/unauthorized", gzipIfAccepted(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/unauthorized" {
@@ -447,11 +453,13 @@ func (s *Server) Handler() http.Handler {
 	inner.Handle("/api/copy", http.HandlerFunc(s.handleCopy))
 	inner.Handle("/api/move", http.HandlerFunc(s.handleMove))
 	inner.Handle("/api/write", http.HandlerFunc(s.handleWrite))
-	inner.Handle("/api/admin/bcrypt", http.HandlerFunc(s.handleAdminBcrypt))
-	inner.Handle("/api/admin/state", http.HandlerFunc(s.handleAdminState))
-	inner.Handle("/api/admin/config", http.HandlerFunc(s.handleAdminConfig))
-	inner.Handle("/api/admin/users", http.HandlerFunc(s.handleAdminUsers))
-	inner.Handle("/api/admin/tokens", http.HandlerFunc(s.handleAdminTokens))
+	if !s.disableAdmin {
+		inner.Handle("/api/admin/bcrypt", http.HandlerFunc(s.handleAdminBcrypt))
+		inner.Handle("/api/admin/state", http.HandlerFunc(s.handleAdminState))
+		inner.Handle("/api/admin/config", http.HandlerFunc(s.handleAdminConfig))
+		inner.Handle("/api/admin/users", http.HandlerFunc(s.handleAdminUsers))
+		inner.Handle("/api/admin/tokens", http.HandlerFunc(s.handleAdminTokens))
+	}
 	inner.Handle("/api/upload", s.require(auth.PermWrite, http.HandlerFunc(s.handleMultipartUpload)))
 
 	// resumable uploads
@@ -1779,6 +1787,10 @@ func (s *Server) handleCopy(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		if err := validateTransferTargets(st, srcAbs, dstAbs); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		if st.IsDir() {
 			if err := copyDirNoSymlinks(srcAbs, dstAbs, mode == "overwrite"); err != nil {
 				http.Error(w, "copy failed", http.StatusInternalServerError)
@@ -1876,7 +1888,8 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "bad path", http.StatusBadRequest)
 			return
 		}
-		if _, err := os.Stat(srcAbs); err != nil {
+		st, err := os.Stat(srcAbs)
+		if err != nil {
 			http.NotFound(w, r)
 			return
 		}
@@ -1905,6 +1918,7 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 			dstExists = true
 		}
 		status := "ok"
+		wipeDest := false
 		if dstExists {
 			switch mode {
 			case "skip":
@@ -1929,8 +1943,16 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 				status = "renamed"
 			case "overwrite":
 				status = "overwritten"
-				_ = os.RemoveAll(dstAbs)
+				wipeDest = true
 			}
+		}
+
+		if err := validateTransferTargets(st, srcAbs, dstAbs); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if wipeDest {
+			_ = os.RemoveAll(dstAbs)
 		}
 
 		// Try rename first.
@@ -1940,13 +1962,8 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := os.Rename(srcAbs, dstAbs); err != nil {
 			// cross-device or other rename issues: copy+delete
-			st, serr := os.Stat(srcAbs)
-			if serr != nil {
-				http.Error(w, "move failed", http.StatusInternalServerError)
-				return
-			}
 			if st.IsDir() {
-				if err := copyDirNoSymlinks(srcAbs, dstAbs, req.Overwrite); err != nil {
+				if err := copyDirNoSymlinks(srcAbs, dstAbs, mode == "overwrite"); err != nil {
 					http.Error(w, "move failed", http.StatusInternalServerError)
 					return
 				}
@@ -1955,7 +1972,7 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			} else {
-				if err := copyFileAtomic(srcAbs, dstAbs, req.Overwrite); err != nil {
+				if err := copyFileAtomic(srcAbs, dstAbs, mode == "overwrite"); err != nil {
 					if errors.Is(err, os.ErrExist) {
 						http.Error(w, "destination exists", http.StatusConflict)
 						return
@@ -2797,6 +2814,49 @@ func copyDirNoSymlinks(srcDir, dstDir string, overwrite bool) error {
 		}
 		return copyFileAtomic(p, dst, overwrite)
 	})
+}
+
+func isSameOrDescendant(parent, candidate string) bool {
+	if parent == "" || candidate == "" {
+		return false
+	}
+	parentClean := filepath.Clean(parent)
+	candidateClean := filepath.Clean(candidate)
+	if equalPaths(parentClean, candidateClean) {
+		return true
+	}
+	if runtime.GOOS == "windows" {
+		parentClean = strings.ToLower(parentClean)
+		candidateClean = strings.ToLower(candidateClean)
+	}
+	sep := string(os.PathSeparator)
+	if !strings.HasSuffix(parentClean, sep) {
+		parentClean += sep
+	}
+	return strings.HasPrefix(candidateClean, parentClean)
+}
+
+func equalPaths(a, b string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(filepath.Clean(a), filepath.Clean(b))
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
+}
+
+func validateTransferTargets(st os.FileInfo, srcAbs, dstAbs string) error {
+	if st == nil {
+		return errors.New("missing source info")
+	}
+	if st.IsDir() {
+		if isSameOrDescendant(srcAbs, dstAbs) {
+			return errors.New("destination is inside source")
+		}
+		return nil
+	}
+	if equalPaths(srcAbs, dstAbs) {
+		return errors.New("destination matches source")
+	}
+	return nil
 }
 
 func uniqueNameInDir(dirAbs, base string) (string, error) {

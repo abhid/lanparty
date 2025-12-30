@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"golang.org/x/crypto/bcrypt"
@@ -25,6 +26,16 @@ var (
 	builtAt = ""
 )
 
+const (
+	envAddr          = "LANPARTY_ADDR"
+	envRoot          = "LANPARTY_ROOT"
+	envStateDir      = "LANPARTY_STATE_DIR"
+	envConfigPath    = "LANPARTY_CONFIG"
+	envPortable      = "LANPARTY_PORTABLE"
+	envFollowSymlink = "LANPARTY_FOLLOW_SYMLINKS"
+	envDisableAdmin  = "LANPARTY_DISABLE_ADMIN"
+)
+
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
@@ -34,12 +45,13 @@ func main() {
 	}
 
 	var (
-		addr      = flag.String("addr", "0.0.0.0:3923", "listen address")
-		root      = flag.String("root", "", "share root (required if -config is not set)")
-		stateDir  = flag.String("state", "", "state dir for uploads/dedup/thumbs (default: <root>/.lanparty)")
-		cfgPath   = flag.String("config", "", "path to config json (optional)")
-		portable  = flag.Bool("portable", false, "store all state in ./ .lanparty-state instead of inside share roots (useful for portable/readonly shares)")
-		followSym = flag.Bool("follow-symlinks", false, "allow following symlinks/junctions (only when resolved target stays inside the share root)")
+		addr      = flag.String("addr", stringFromEnv(envAddr, "0.0.0.0:3923"), "listen address (env "+envAddr+")")
+		root      = flag.String("root", stringFromEnv(envRoot, ""), "share root (env "+envRoot+"). required if -config is not set")
+		stateDir  = flag.String("state", stringFromEnv(envStateDir, ""), "state dir for uploads/dedup/thumbs (env "+envStateDir+"); default <root>/.lanparty")
+		cfgPath   = flag.String("config", stringFromEnv(envConfigPath, ""), "path to config json (env "+envConfigPath+")")
+		portable  = flag.Bool("portable", boolFromEnv(envPortable, false), "store state in ./ .lanparty-state (env "+envPortable+")")
+		followSym = flag.Bool("follow-symlinks", boolFromEnv(envFollowSymlink, false), "allow following symlinks (env "+envFollowSymlink+")")
+		disableAd = flag.Bool("disable-admin", boolFromEnv(envDisableAdmin, false), "disable /admin UI + admin APIs (env "+envDisableAdmin+")")
 		showVer   = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
@@ -138,14 +150,22 @@ func main() {
 		cfg.Shares[name] = sh
 	}
 
-	genAdmin, adminUser, adminPass, err := ensureAdminACL(&cfg)
-	if err != nil {
-		log.Fatalf("bootstrap admin: %v", err)
+	var (
+		genAdmin             bool
+		adminUser, adminPass string
+	)
+	if !*disableAd {
+		var err error
+		genAdmin, adminUser, adminPass, err = ensureAdminACL(&cfg)
+		if err != nil {
+			log.Fatalf("bootstrap admin: %v", err)
+		}
 	}
 
 	srv, err := httpserver.New(httpserver.Options{
-		Config:     cfg,
-		ConfigPath: *cfgPath,
+		Config:       cfg,
+		ConfigPath:   *cfgPath,
+		DisableAdmin: *disableAd,
 	})
 	if err != nil {
 		log.Fatalf("server init: %v", err)
@@ -160,6 +180,9 @@ func main() {
 		log.Printf("portable state dir: %s", portableBase)
 	}
 	log.Printf("webdav endpoint: http://%s/dav/  (use BasicAuth if configured)", *addr)
+	if *disableAd {
+		log.Printf("admin endpoints disabled (config changes via file only)")
+	}
 	if genAdmin {
 		fmt.Printf("[admin] bootstrap credentials for /admin: %s / %s\n", adminUser, adminPass)
 		fmt.Println("         Update your config ACLs to use your own admin account.")
@@ -262,4 +285,23 @@ func randomToken(n int) string {
 		return fmt.Sprintf("%0*x", len(b), b)
 	}
 	return base64.RawURLEncoding.EncodeToString(b)[:n]
+}
+
+func stringFromEnv(name, fallback string) string {
+	if v := strings.TrimSpace(os.Getenv(name)); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func boolFromEnv(name string, fallback bool) bool {
+	v := strings.TrimSpace(os.Getenv(name))
+	if v == "" {
+		return fallback
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		log.Fatalf("invalid boolean value %q for %s", v, name)
+	}
+	return b
 }
